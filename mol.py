@@ -10,7 +10,7 @@ logger = utils.Logger()
 class Molecule(object):
     def __init__(self):
         self.atoms = []
-        
+        self.labels = {} #number -> atom
         #when the ring_bonds are removed,
         #the rest of the nodes form a tree
         self.children = {}
@@ -67,6 +67,8 @@ class Atom(object):
         self.bonds = [] #[(bond_type, Atom)]
     def add_bond(self, atom, bond):
         self.bonds.append((atom,bond))
+    def bond_summaries(self):
+        return [(str(bond_type), str(a)) for bond_type, a in self.bonds]
     def __str__(self):
         return self.name
 
@@ -89,6 +91,8 @@ class Bond(object):
             raise
     def __str__(self):
         return str(self.bond_string)
+    def __eq__(self, other):
+        return str(self.bond_string) == str(other.bond_string)
 
     
 def take_next(smiles):
@@ -134,8 +138,6 @@ def append_smiles_clause(smiles_clause, mol, atom = None):
     if atom == None:
         atom = mol.last_atom()
     for chunk in get_chunks(smiles_clause):
-        print "Current smiles: " + mol_to_smiles(mol)
-        print "chunk: " + chunk
         if chunk[0] == "(" and chunk[-1] == ")":
             #append branch
             clause = chunk[1:-1]
@@ -147,14 +149,15 @@ def append_smiles_clause(smiles_clause, mol, atom = None):
             #add
         else:
             bond_string, main = re.findall(r"([{BOND_CHARS}]?)(.*)".format(**globals()),chunk)[0]
-        print "bond: " + bond_string
-        print "main: " + main
         element, rest = parse_element(main)
         next_atom = Atom(element)
+        if ":" in rest: #C:1
+            label = rest.split(":")[1]
+            mol.labels[label] = next_atom
         b = Bond(bond_string)
         if atom:
-            atom.bonds.append([b, next_atom])
-            next_atom.bonds.append([b, atom])
+            atom.bonds.append((b, next_atom))
+            next_atom.bonds.append((b, atom))
         mol.atoms.append(next_atom)
         atom = mol.last_atom()
     return mol
@@ -187,6 +190,93 @@ def smiles_helper(mol, atom):
         out += smiles_helper(mol,children[-1])
     return out
 
+def smarts2reaction(smarts, mol):
+    reactants, products = smarts.split(">>",1)
+    for chunk in get_chunks(reactants):
+        print chunk
+
+def counter(l, key=lambda x: x):
+    cnts = {}
+    for i in l:
+        k = key(i)
+        cnts[k] = cnts.get(k,0) + 1
+    return cnts
+
+def is_subset(list1, list2):
+    return is_counter_subset(counter(list1),counter(list2))
+
+def is_counter_subset(counter1, counter2):
+    #check that counter1 < counter2
+    for k1,v1 in counter1.items():
+        if v1 > counter2.get(k1,0):
+            return False
+    return True
+
+def find_substructure(sub_mol, mol):
+    #atom -> (bond_type, atom_type) -> cnt
+    # mol_cnts = dict((a,counter(a.bond_summaries())) for a in mol.atoms)
+
+    def is_bond_subset(atom1, atom2):
+        return is_subset(atom1.bond_summaries(), atom2.bond_summaries())
+
+    possibilities = {}
+    for a1 in sub_mol.atoms:
+        for a2 in mol.atoms:
+            if str(a1) == str(a2) and is_bond_subset(a1, a2):
+                print a1.bond_summaries(), a2.bond_summaries()
+                possibilities.setdefault(a1,[]).append(a2)
+
+    for a1 in sub_mol.atoms:
+        for a2 in mol.atoms:
+            pass
+
+    print match_substructure_helper(sub_mol, mol, possibilities, {}, {})
+    #match the first atom
+    # q = collections.deque()
+    # done = {}
+    # q.append(matches.keys()[0])
+    # while q:
+    #     next_atom = q.popleft()
+    #     if next_atom in done:
+    #         continue
+    #     #try to match this atom
+    #     for bond_type, neighbor in next_atom.bonds:
+    #         pass
+    #first check which atom from sub_mol is the hardest to match in mol 
+    # for a in sub_mol.atoms:
+    #     cnts = counter(a.bond_summaries())
+    #     matches = []
+    #     for b in mol_cnts:
+    #         for k,v in cnts.items():
+    # pass
+
+def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
+    """matches = [(atom from sub_mol, mapped atom from mol)]"""
+    #base case
+    #all done matching -- check that it works!
+    if len(matches) == len(sub_mol.atoms):
+        for a1 in sub_mol.atoms:
+            b1 = matches[a1]
+            for bond_type, neighbor in a1.bonds:
+                if not (bond_type, matches[neighbor]) in b1.bonds:
+                    return [] #no match!
+        return [matches.copy()]
+
+    #recursion
+    out = []
+    for a1 in sub_mol.atoms:
+        if a1 in matches:
+            continue
+        for m in possibilities[a1]:
+            matches[a1] = m
+            out += match_substructure_helper(sub_mol, mol, possibilities, matches, done)
+            matches.pop(a1)
+        break #only process one atom from sub_mol.atoms, then break
+    return out
+
+def run_reaction(react_smiles, product_smiles, mol):
+    pass
+    
 def test_chunks():
     s = "CCCC=O"
     s = '[CH3][CH2]C#[CH]'
@@ -194,11 +284,16 @@ def test_chunks():
     while s:
         chunk, s = take_next(s)
         print chunk
-    
-if __name__ == "__main__":
+
+def test_mol_to_smiles():
     s = '[CH3][CH2]C#[CH]'
     s = 'CC(Br)CC'
     m = smiles_to_mol(s)
-    m.setup_dfs()
-    print m
-    print mol_to_smiles(m)
+    s_out = mol_to_smiles(m)
+    assert(s_out == s)
+
+if __name__ == "__main__":
+    m1 = smiles_to_mol("CCC(Br)CI")
+    # m2 = smiles_to_mol('[C:1][C:2]([C:3])(Br)[C:4]') #>>[C:1][C:2]([C:3])=[C:4]')
+    m2 = smiles_to_mol("C(Br)CI")
+    find_substructure(m2, m1)
