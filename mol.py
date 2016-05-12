@@ -32,7 +32,7 @@ class Molecule(object):
         stack.append(self.atoms[0])
         while stack:
             next_atom = stack.pop()
-            for bond_type, neighbor in next_atom.bonds[::-1]:
+            for bond_type, neighbor in next_atom.bonds:
                 if neighbor in done and next_atom not in self.children.get(neighbor,[]):
                     self.ring_bonds.setdefault(next_atom,{}).setdefault(neighbor,{})
                     continue
@@ -52,7 +52,7 @@ class Molecule(object):
         stack.append(start_node)
         while stack:
             next_atom = stack.pop()
-            for a in self.children.get(next_atom,[])[::-1]:
+            for a in self.children.get(next_atom,[]):
                 stack.append(a)
                 print "appending... " + str(a)
             yield next_atom
