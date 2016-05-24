@@ -16,6 +16,8 @@ class Structure(object):
     """Representation of a molecular structure:
     """
     def __init__(self):
+        self.setup()
+    def setup(self):
         self.atoms = []
         self.atom2label = {} #for labels like [C:4]
         self.label2atom = {}
@@ -30,7 +32,6 @@ class Structure(object):
         self.children = {}
         self.parent = {}
         self.ring_bonds = {} #{atom1 : {atom2 : label_number}}
-        
     def append_smiles_clause(self, smiles_clause, atom = None, template=False):
         if atom == None:
             atom = self.last_atom()
@@ -58,26 +59,46 @@ class Structure(object):
                 self.add_bond(atom, next_atom,b)
             self.atoms.append(next_atom)
             atom = self.last_atom()
-        
     def copy(self):
-        out = Structure()
-        out.atoms = copy.copy(self.atoms)
-        out.atom2label = copy.copy(self.atom2label)
-        out.label2atom = copy.copy(self.label2atom)
+        #return
+        #copied_object, along with a map from old atoms to new atoms
+        out, atom_map = self.copy_with_map()
+        return out
+    def copy_with_map(self):
+        out = object.__new__(self.__class__)
+        out.setup()
+
+        #create a mapping from atoms in the current obj to atoms in the copied object
+        atom_map = {}
+        for a in self.atoms:
+            a_new = Atom(a.name, out)
+            atom_map[a] = a_new
+
+        out.atoms = atom_map.values()
+            
+        out.atom2label = dict((atom_map[a],l) for a in self.atom2label)
+        out.label2atom = dict((l,atom_map[a]) for l in self.label2atom)
 
         #the self.bonds and self.ordered_bonds dictionaries
         #are nested, so copy.copy won't work
         #also deepcopy will copy the atom elements themselves, which
         #we don't want
         #so re-add the bonds:
-        for atom,v in self.bonds.items():
-            for atom2,bond in v.items():
-                out.add_bond(atom,atom2,bond)
+        for a,v in self.bonds.items():
+            for a2,bond in v.items():
+                out.add_bond(atom_map[a],atom_map[a2],bond)
 
-        out.children = copy.copy(self.children)
-        out.parent = copy.copy(self.parent)
-        out.ring_bonds = copy.copy(self.ring_bonds)
-        return out
+
+        for a1,l in self.children.items():
+            out.children[atom_map[a1]] = [atom_map[a2] for a2 in l]
+
+        out.parent = dict((atom_map[a1],atom_map[a2]) for a1,a2 in self.parent.items())
+
+        for a1,v in self.ring_bonds.items():
+            for a2, val in v.items():
+                out.ring_bonds.setdefault(atom_map[a1],{})[atom_map[a2]] = val
+        return out, atom_map
+    
     def last_atom(self):
         if self.atoms:
             return self.atoms[-1]
@@ -119,6 +140,7 @@ class Structure(object):
         self.bonds[atom2].pop(atom1)
         self.ordered_bonds[atom1].remove((atom2, bond_type))
         self.ordered_bonds[atom2].remove((atom1, bond_type))
+
     def setup_dfs(self):
         self.children = {}
         self.parent = {}
@@ -155,6 +177,17 @@ class Structure(object):
             yield next_atom
     def __str__(self):
         return mol_to_smiles(self)
+    def bond_str(self):
+        out = []
+        for a1,v in self.bonds.items():
+            for a2,b2 in v.items():
+                out.append([str(a1),str(a2),str(b2)])
+        return str(out)
+    def bond_summary_str(self):
+        out = ""
+        for a1 in self.atoms:
+            out += str([(str(x),str(y)) for x,y in self.bond_summary(a1)]) + "\n"
+        return out
     
 class Molecule(Structure):
     """
@@ -164,6 +197,8 @@ class Molecule(Structure):
         super(Molecule,self).__init__()
         #parse the smiles clause and add atom-by-atom
         self.append_smiles_clause(smiles, template=False)
+    def __eq__(self, other):
+        return (len(self.atoms) == len(other.atoms)) and (find_substructure(self, other) != [])
     
 class Substructure(Structure):
     """
@@ -193,17 +228,21 @@ class Reaction(object):
         reactants_mol = reactants_tuple[0]
         mappings = find_substructure(self.reactant_template, reactants_mol)
         out = []
-        for m in mappings:
-            mol_to_transform = reactants_mol.copy()
+        for m_basic in mappings:
+            mol_to_transform, copy_map = reactants_mol.copy_with_map()
 
+            #m_basic is a map from self.reactant_template -> reactants_mol
+            #create m a map from self.reactant_template -> mol_to_transform
+            m = dict((k,copy_map[v]) for k,v in m_basic.items())
+            
             #remove all the reactant atom bonds:
             for a1 in self.reactant_template.atoms:
                 for neighbor, bond_type in self.reactant_template.ordered_bonds[a1]:
                     mol_to_transform.remove_bond(m[a1], m[neighbor], bond_type)
                 if not a1 in self.reactant_template.atom2label:
-                    #TODO: delete it
                     mol_to_transform.remove_atom(m[a1])
 
+            
             #generate mapping from product_template to reactants_mol using
             #the labels to map from product_template to reactant_template + 
             #the existing mapping from reactant_template to reactants_mol
@@ -293,7 +332,7 @@ class Retro(object):
         return out
     @classmethod
     def equal(cls, mol_list1, mol_list2):
-        return len(cls.drop_duplicates(mol_list1+ mol_list2)) == len(mol_list1)
+        return len(cls.drop_duplicates(mol_list1 + mol_list2)) == len(mol_list1)
 
 class AtomType(object):
     def __init__(self, name, struct):
@@ -326,6 +365,8 @@ class Atom(AtomType):
         return len(self.struct.bonds[self])
     def get_hydrogen_cnt(self):
         return self.max_bond_cnt() - self.cur_bond_cnt()
+    def matches_atom(self, atom):
+        return self.name == atom.name
 
 class AtomPattern(AtomType):
     """Contains partial information about an atom 
@@ -459,8 +500,6 @@ def is_counter_subset(counter1, counter2):
 def find_substructure(substruct, mol):
     #atom -> (bond_type, atom_type) -> cnt
     # mol_cnts = dict((a,counter(a.bond_summaries())) for a in mol.atoms)
-    assert(isinstance(substruct, Substructure) and isinstance(mol, Molecule))
-
     def is_bond_subset(atom1, atom2):
         #need a mapping from atom1's bonds to a subset of atom2's bonds
         bonds1 = atom1.bond_summary()
@@ -576,13 +615,43 @@ def test_all():
     test_mol_to_smiles()
     test_substructure()
 
+
+halohydrin_formation = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+hydrobromination = Retro("Hydrobromination", ['[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]','[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+# dehydrohalogenation = Retro("Dehydrohalogenation", [])
+
 def test_retro():
-    halohydrin_formation = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
-    print halohydrin_formation.run([Molecule("CC(C)(Br)COC")])
+
+    print "Creating reactant"
+    start1 = Molecule("CC(C)(Br)CO")
+    print "running retro:"
+    a = halohydrin_formation.run([start1])[0]
+    print "creating a CC(C)=C molecule"
+    b = Molecule("CC(C)=C")
+    print "checking substructure between reaction product and copy"
+    find_substructure(a,b)
+
+    print "reaction product bonds"
+    print a.bond_str()
+
+    print a.bond_summary_str()
+    
+    print halohydrin_formation.run([start1])[0] == Molecule("CC(C)=C")
+    assert(halohydrin_formation.run([start1]) == [Molecule("CC(C)=C")])
+
+
+    start2 = Molecule("CC(C)(Br)COC")
+    assert(halohydrin_formation.run([start2])[0] == start2)
+
+def test_reactions():
+    #hydrobromination
+    start1 = Molecule("CC(C)(Br)C")
+    assert(hydrobromination.run([start1])[0] == Molecule("CC(C)=C"))
+
+    #dehydrohalogenation
+    start1 = Molecule("CCBr")
     
 if __name__ == "__main__":
     # m1 = smiles_to_mol("CCC(Br)CI")
     # print mol_to_smiles(m1)
-    test_retro()
-
-    # test_substructure()
+    test_reactions()

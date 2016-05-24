@@ -15,7 +15,7 @@ Unsolved rdkit problems:
 (1) Stereochemistry doesn't work for reactions: the reactant template matches regardless of stereochemistry and the stereochemistry information is only used for the difference in chirality between the reactant and the product.
 
 (2) Hard to specify Atom:1 == Atom:2
-For example want a pattern to match ClCCCl, BrCCBr, ICCI, but not ClCCI, etc.
+For example want a pattern to match ClCCCl, BrCCBr, ICCI, but not ClCCBr, etc.
 
 (3) Can't specify how substituted a carbon is
 In particular you can match carbon with C, can match non-carbon, non-hydrogen with !C but there's no way to match all non-carbon atoms (ie including hydrogen!)
