@@ -32,6 +32,7 @@ class Structure(object):
         self.children = {}
         self.parent = {}
         self.ring_bonds = {} #{atom1 : {atom2 : label_number}}
+        self.chirality = {}
     def append_smiles_clause(self, smiles_clause, atom = None, template=False):
         if atom == None:
             atom = self.last_atom()
@@ -51,6 +52,10 @@ class Structure(object):
                 next_atom = AtomPattern(atom_string, self)
             else:
                 next_atom = Atom(atom_string, self)
+            if "@@" in atom_string:
+                self.chirality[next_atom] = "@@"
+            elif "@" in atom_string:
+                self.chirality[next_atom] = "@"
             if label: #C:1
                 self.label2atom[label] = next_atom
                 self.atom2label[next_atom] = label
@@ -222,6 +227,7 @@ def map_labels(mol1, mol2):
 class Reaction(object):
     def __init__(self, smarts):
         smiles1, smiles2 = smarts.split(">>",1)
+        smiles1 = smiles1.strip(); smiles2 = smiles2.strip()
         self.reactant_template = Substructure(smiles1)
         self.product_template = Substructure(smiles2)
     def run(self, reactants_tuple):
@@ -253,7 +259,7 @@ class Reaction(object):
                     reactant = self.reactant_template.label2atom[label]
                     products_map[a2] = m[reactant]
                 else:
-                    new_atom = Atom(str(a2))
+                    new_atom = Atom(str(a2), mol_to_transform)
                     mol_to_transform.atoms.append(new_atom)
                     products_map[a2] = new_atom
 
@@ -263,7 +269,7 @@ class Reaction(object):
                     if not neighbor in products_map:
                         # print "missing from mapping!"
                         #create new atom and add to mapping
-                        new_atom = Atom(str(neighbor))
+                        new_atom = Atom(str(neighbor), mol_to_transform)
                         mol_to_transform.atoms.append(new_atom)
                         products_map[neighbor] = new_atom
                     
@@ -336,7 +342,7 @@ class Retro(object):
 
 class AtomType(object):
     def __init__(self, name, struct):
-        self.name = name
+        self.name = name.replace("@","")
         self.struct = struct
     def bond_summary(self):
         return self.struct.bond_summary(self)
@@ -416,7 +422,7 @@ class Bond(object):
     def __eq__(self, other):
         return str(self.bond_string) == str(other.bond_string)
 
-    
+
 def take_next(smiles):
     if smiles[0] == "(":
         #TODO: below regex will fail on nested branches
@@ -465,6 +471,38 @@ def mol_to_smiles(mol):
         return ""
     return smiles_helper(mol,mol.atoms[0])
 
+def compare_stereochemistry(bonded_atoms1, bonded_atoms2):
+    #return 1 if two lists of bonded atoms are in the same orientation
+    #and 0 otherwise
+    if len(bonded_atoms1) != 4 or len(bonded_atoms2) != 4:
+        raise
+    perm = {}
+    for i1,a1 in enumerate(bonded_atoms1):
+        for i2,a2 in enumerate(bonded_atoms2):
+            if a1 == a2:
+                perm[i1] = i2
+    return 1 * (permutation_parity(perm) == 1)
+
+def permutation_parity(f):
+    #f stores permutation in function form
+    #easy to code O(n**2) algo
+    #http://math.stackexchange.com/a/1553215
+    prod = 1
+    for i in f:
+        for j in f:
+            if j <= i:
+                continue
+            prod *= (f[i] - f[j]) / float(i - j)
+    return prod
+        
+def opposite_chirality(c):
+    if c == "@":
+        return "@@"
+    elif c == "@@":
+        return "@"
+    else:
+        raise
+    
 def smiles_helper(mol, atom):
     """Compute smiles of a subsection of the molecule rooted at 'atom'"""
     children = mol.children.get(atom,[])
@@ -472,7 +510,21 @@ def smiles_helper(mol, atom):
     out = ""
     if parent:
         out += str(mol.bonds[atom][parent])
-    out += str(atom)
+    #check how the dfs ordering compares with the stereochemistry:
+    stereo_str = ""
+    if len(mol.bonds[atom]) == 4 and atom in mol.chirality:
+        neighbors = []
+        if mol.parent.get(atom,None):
+            neighbors += [mol.parent[atom]]
+        neighbors += children
+        if compare_stereochemistry(mol.ordered_bonds[atom], neighbors):
+            stereo_str = mol.chirality[atom]
+        else:
+            stereo_str = opposite_chirality(mol.chirality[atom])
+    if stereo_str:
+        out += "["+str(atom)+stereo_str+"]"
+    else:
+        out += str(atom)
     if len(children) > 1:
         for c in children[:-1]:
             out += "(" + smiles_helper(mol,c) + ")"
@@ -595,12 +647,10 @@ def test_mol_to_smiles():
 
 def test_substructure():
     m1 = Molecule("CCC(Br)CI")
-    # m2 = smiles_to_mol('[C:1][C:2]([C:3])(Br)[C:4]') #>>[C:1][C:2]([C:3])=[C:4]')
     m2 = Substructure("C(Br)CI")
     assert(len(find_substructure(m2, m1)) == 1)
 
     m1 = Molecule("CCC(Br)C")
-    # m2 = smiles_to_mol('[C:1][C:2]([C:3])(Br)[C:4]') #>>[C:1][C:2]([C:3])=[C:4]')
     m2 = Substructure("C(Br)C")
     assert(len(find_substructure(m2, m1)) == 2)
 
@@ -616,16 +666,28 @@ def test_all():
     test_substructure()
 
 
-halohydrin_formation = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
-hydrobromination = Retro("Hydrobromination", ['[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]','[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
-# dehydrohalogenation = Retro("Dehydrohalogenation", [])
+all_retros = {}
+    
+def rxn_setup():
+    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+
+    all_retros["hydrobromination"] = Retro("Hydrobromination", ['[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]','[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+
+    # dehydrohalogenation = Retro("Dehydrohalogenation", ['[C:1]=[C:2] >> [C:1][C:2][F,Cl,Br,I]'])
+
+    all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
+
+    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", ['[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]'])
+    
+    # halohydrin_formation = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+    # oxymercuration = Retro("Oxymercuration", ['[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
 def test_retro():
 
     print "Creating reactant"
     start1 = Molecule("CC(C)(Br)CO")
     print "running retro:"
-    a = halohydrin_formation.run([start1])[0]
+    a = all_retros["halohydrin_formation"].run([start1])[0]
     print "creating a CC(C)=C molecule"
     b = Molecule("CC(C)=C")
     print "checking substructure between reaction product and copy"
@@ -636,22 +698,37 @@ def test_retro():
 
     print a.bond_summary_str()
     
-    print halohydrin_formation.run([start1])[0] == Molecule("CC(C)=C")
-    assert(halohydrin_formation.run([start1]) == [Molecule("CC(C)=C")])
+    print all_retros["halohydrin_formation"].run([start1])[0] == Molecule("CC(C)=C")
+    assert(all_retros["halohydrin_formation"].run([start1]) == [Molecule("CC(C)=C")])
 
 
     start2 = Molecule("CC(C)(Br)COC")
-    assert(halohydrin_formation.run([start2])[0] == start2)
+    assert(all_retros["halohydrin_formation"].run([start2])[0] == start2)
 
 def test_reactions():
+    rxn_setup()
+    
     #hydrobromination
     start1 = Molecule("CC(C)(Br)C")
-    assert(hydrobromination.run([start1])[0] == Molecule("CC(C)=C"))
+    assert(all_retros["hydrobromination"].run([start1])[0] == Molecule("CC(C)=C"))
 
     #dehydrohalogenation
-    start1 = Molecule("CCBr")
+    # start1 = Molecule("CCBr")
+
+    #alcohol_dehydration
+    start1 = Molecule("C=CCCC")
+    #TODO:
+    #smarter SMILES printing: eg
+    #C(CC(C)O)C
+    #better as
+    #CCCC(O)C
+    print all_retros["alcohol_dehydration"].run([start1])[0]
+    
     
 if __name__ == "__main__":
     # m1 = smiles_to_mol("CCC(Br)CI")
     # print mol_to_smiles(m1)
-    test_reactions()
+
+    # test_reactions()
+    print Molecule("C[C@](Br)(Cl)I")
+    
