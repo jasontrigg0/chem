@@ -31,8 +31,10 @@ class Structure(object):
         #the rest of the nodes form a tree
         self.children = {}
         self.parent = {}
-        self.ring_bonds = {} #{atom1 : {atom2 : label_number}}
+        self.ring_bonds = {} #used by DFS: {atom1: [(bond_type,label_number)]}
         self.chirality = {}
+        
+        self.ring_bond_labels = {} #{label: [(atom,bond_type)]}
     def append_smiles_clause(self, smiles_clause, atom = None, template=False):
         if atom == None:
             atom = self.last_atom()
@@ -43,10 +45,10 @@ class Structure(object):
                 self.append_smiles_clause(clause, atom, template=template)
                 continue
             if "[" in chunk:
-                bond_string, main = re.findall(r"([{BOND_CHARS}]?)\[(.*)\]".format(**globals()),chunk)[0]
+                bond_string, main, ring_bond_label = re.findall(r"^([{BOND_CHARS}]?)\[(.*)\]([{BOND_CHARS}]?\d*)$".format(**globals()),chunk)[0]
                 #add
             else:
-                bond_string, main = re.findall(r"([{BOND_CHARS}]?)(.*)".format(**globals()),chunk)[0]
+                bond_string, main, ring_bond_label = re.findall(r"^([{BOND_CHARS}]?)(.*?)([{BOND_CHARS}]?\d*)$".format(**globals()),chunk)[0]
             atom_string, label = parse_atom(main)
             if template:
                 next_atom = AtomPattern(atom_string, self)
@@ -62,6 +64,19 @@ class Structure(object):
             b = Bond(bond_string)
             if atom:
                 self.add_bond(atom, next_atom,b)
+
+            #add ring_bond_label
+            if ring_bond_label:
+                self.ring_bond_labels.setdefault(ring_bond_label,[]).append((next_atom, b))
+                if len(self.ring_bond_labels[ring_bond_label]) > 2:
+                    raise Exception("ERROR: three or more copies of the same ring bond")
+                elif len(self.ring_bond_labels[ring_bond_label]) == 2:
+                    a1,b1 = self.ring_bond_labels[ring_bond_label][0]
+                    a2,b2 = self.ring_bond_labels[ring_bond_label][1]
+                    if b1 != b2:
+                        raise Exception("ERROR: ring bonds with same label ({ring_bond_label}) have different bonds".format(**vars()))
+                    
+                    self.add_bond(a1,a2,b1)
             self.atoms.append(next_atom)
             atom = self.last_atom()
     def copy(self):
@@ -81,9 +96,11 @@ class Structure(object):
 
         out.atoms = atom_map.values()
             
-        out.atom2label = dict((atom_map[a],l) for a in self.atom2label)
-        out.label2atom = dict((l,atom_map[a]) for l in self.label2atom)
+        out.atom2label = dict((atom_map[a],l) for a,l in self.atom2label.items())
+        out.label2atom = dict((l,atom_map[a]) for l,a in self.label2atom.items())
 
+        out.chirality = dict((atom_map[a],c) for a,c in self.chirality.items())
+        
         #the self.bonds and self.ordered_bonds dictionaries
         #are nested, so copy.copy won't work
         #also deepcopy will copy the atom elements themselves, which
@@ -100,8 +117,7 @@ class Structure(object):
         out.parent = dict((atom_map[a1],atom_map[a2]) for a1,a2 in self.parent.items())
 
         for a1,v in self.ring_bonds.items():
-            for a2, val in v.items():
-                out.ring_bonds.setdefault(atom_map[a1],{})[atom_map[a2]] = val
+            out.ring_bonds.setdefault(atom_map[a1],[]).append(v)
         return out, atom_map
     
     def last_atom(self):
@@ -137,6 +153,8 @@ class Structure(object):
         self.atoms.remove(atom1)
         self.bonds.pop(atom1)
         self.ordered_bonds.pop(atom1)
+        if atom1 in self.chirality:
+            self.chirality.pop(atom1)
     def remove_bond(self, atom1, atom2, bond_type):
         if not self.bonds.get(atom1,{}).get(atom2,None) or\
            not self.bonds.get(atom2,{}).get(atom1,None):
@@ -154,20 +172,26 @@ class Structure(object):
             return
         done = set()
         stack = collections.deque()
-        stack.append(self.atoms[0])
+        stack.append((self.atoms[0],None,None))
+        next_ring_label = 1
         while stack:
-            next_atom = stack.pop()
-            for neighbor, bond_type in self.ordered_bonds[next_atom]:
-                if neighbor in done and next_atom not in self.children.get(neighbor,[]):
-                    self.ring_bonds.setdefault(next_atom,{}).setdefault(neighbor,{})
-                    continue
-                if neighbor in done and next_atom in self.children.get(neighbor,[]):
-                    self.parent[next_atom] = neighbor
-                else:
-                    self.children.setdefault(next_atom,[]).append(neighbor)
-                if neighbor not in done:
-                    stack.append(neighbor)
-            done.add(next_atom)
+            curr_atom, parent, bond_type = stack.pop()
+            if curr_atom in done:
+                #second time we've reached this atom --> ring bond!
+                self.ring_bonds.setdefault(curr_atom,[]).append((bond_type, next_ring_label))
+                self.ring_bonds.setdefault(parent,[]).append((bond_type, next_ring_label))
+                next_ring_label += 1
+            else:
+                if parent:
+                    self.parent[curr_atom] = parent
+                    self.children.setdefault(parent,[]).append(curr_atom)
+
+                #expand all edges exactly once
+                for neighbor, bond_type in self.ordered_bonds[curr_atom]:
+                    if neighbor in done: continue #don't process the same edge twice
+                    stack.append((neighbor, curr_atom, bond_type))
+                
+                done.add(curr_atom)
     def dfs(self, start_node=None):
         if not start_node and self.atoms:
             start_node = self.atoms[0]
@@ -204,6 +228,8 @@ class Molecule(Structure):
         self.append_smiles_clause(smiles, template=False)
     def __eq__(self, other):
         return (len(self.atoms) == len(other.atoms)) and (find_substructure(self, other) != [])
+    def __ne__(self, other):
+        return not self == other
     
 class Substructure(Structure):
     """
@@ -226,6 +252,7 @@ def map_labels(mol1, mol2):
 
 class Reaction(object):
     def __init__(self, smarts):
+        self.smarts = smarts
         smiles1, smiles2 = smarts.split(">>",1)
         smiles1 = smiles1.strip(); smiles2 = smiles2.strip()
         self.reactant_template = Substructure(smiles1)
@@ -248,7 +275,15 @@ class Reaction(object):
                 if not a1 in self.reactant_template.atom2label:
                     mol_to_transform.remove_atom(m[a1])
 
-            
+
+            def add_atom_copy(old_atom, new_mol):
+                old_mol = old_atom.struct
+                new_atom = Atom(str(old_atom), new_mol)
+                new_mol.atoms.append(new_atom)
+                if old_atom in old_mol.chirality:
+                    new_mol.chirality[new_atom] = old_mol.chirality[old_atom]
+                return new_atom
+                
             #generate mapping from product_template to reactants_mol using
             #the labels to map from product_template to reactant_template + 
             #the existing mapping from reactant_template to reactants_mol
@@ -259,8 +294,7 @@ class Reaction(object):
                     reactant = self.reactant_template.label2atom[label]
                     products_map[a2] = m[reactant]
                 else:
-                    new_atom = Atom(str(a2), mol_to_transform)
-                    mol_to_transform.atoms.append(new_atom)
+                    new_atom = add_atom_copy(a2, mol_to_transform)
                     products_map[a2] = new_atom
 
             #add all the reaction product bonds:
@@ -269,14 +303,14 @@ class Reaction(object):
                     if not neighbor in products_map:
                         # print "missing from mapping!"
                         #create new atom and add to mapping
-                        new_atom = Atom(str(neighbor), mol_to_transform)
-                        mol_to_transform.atoms.append(new_atom)
+                        new_atom = add_atom_copy(neighbor, mol_to_transform)
                         products_map[neighbor] = new_atom
-                    
                     mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
             product_set = (mol_to_transform,)
             out.append(product_set)
         return out
+    def __str__(self):
+        return self.smarts
 
 class Retro(object):
     def __init__(self, name, rxn_string_list):
@@ -348,7 +382,7 @@ class AtomType(object):
         return self.struct.bond_summary(self)
     @property
     def elt(self):
-        for e in ["Cl","C","O","Br","I"]:
+        for e in ["Cl","C","O","Br","I","F"]:
             if self.name.replace("!","").startswith(e):
                 return e
         raise Exception("Couldn't parse AtomPattern " + self.name)
@@ -365,7 +399,9 @@ class Atom(AtomType):
                    "O":2,
                    "Br":1,
                    "I":1,
-                   "Cl":1}
+                   "Cl":1,
+                   "F":1,
+        }
         return elt2cnt[self.name]
     def cur_bond_cnt(self):
         return len(self.struct.bonds[self])
@@ -421,6 +457,8 @@ class Bond(object):
         return str(self.bond_string)
     def __eq__(self, other):
         return str(self.bond_string) == str(other.bond_string)
+    def __ne__(self, other):
+        return not self == other
 
 
 def take_next(smiles):
@@ -429,25 +467,18 @@ def take_next(smiles):
         branch, rest = re.findall(r"^(\(.*?\))(.*)$",smiles)[0]
         return branch, rest
 
-    re_MAIN = r"^([{BOND_CHARS}]?(Cl|Br|O|I|C)\d*)(.*)$".format(**globals())
+    re_MAIN = r"^([{BOND_CHARS}]?(Cl|Br|O|I|C|F)\d*)(.*)$".format(**globals())
     m_main = re.findall(re_MAIN,smiles)
     if m_main:
         main, _, rest = m_main[0]
         return main, rest
 
-    re_BRACKET = r"^([{BOND_CHARS}]?\[.*?\])(.*)$".format(**globals())
+    re_BRACKET = r"^([{BOND_CHARS}]?\[.*?\]\d*)(.*)$".format(**globals())
     m_bracket = re.findall(re_BRACKET, smiles)
     if m_bracket:
         bracket, rest = m_bracket[0]
         return bracket, rest
 
-    # for char in smiles_list:
-    #     if char not in bond_chars:
-    #         next_atom = Atom(char)
-    #         if last_atom:
-    #             last_atom.add_bond(next_atom, BONDS.SINGLE)
-    #             next_atom.add_bond(last_atom, BONDS.SINGLE)
-    #         last_atom = next_atom
 
 def get_chunks(smiles):
     while smiles:
@@ -461,7 +492,7 @@ def parse_atom(main):
     if ":" in main:
         return main.split(":",1)
     return main, None
-        
+
 def add_atom(mol, next_atom):
     last_atom = mol.last_atom
 
@@ -481,6 +512,8 @@ def compare_stereochemistry(bonded_atoms1, bonded_atoms2):
         for i2,a2 in enumerate(bonded_atoms2):
             if a1 == a2:
                 perm[i1] = i2
+    if not len(perm) == 4:
+        raise Exception("ERROR: couldn't match all 4 atoms")
     return 1 * (permutation_parity(perm) == 1)
 
 def permutation_parity(f):
@@ -513,11 +546,12 @@ def smiles_helper(mol, atom):
     #check how the dfs ordering compares with the stereochemistry:
     stereo_str = ""
     if len(mol.bonds[atom]) == 4 and atom in mol.chirality:
-        neighbors = []
+        mol_neighbors = [n for n,_ in mol.ordered_bonds[atom]]
+        smiles_neighbors = []
         if mol.parent.get(atom,None):
-            neighbors += [mol.parent[atom]]
-        neighbors += children
-        if compare_stereochemistry(mol.ordered_bonds[atom], neighbors):
+            smiles_neighbors += [mol.parent[atom]]
+        smiles_neighbors += children
+        if compare_stereochemistry(mol_neighbors, smiles_neighbors):
             stereo_str = mol.chirality[atom]
         else:
             stereo_str = opposite_chirality(mol.chirality[atom])
@@ -525,6 +559,8 @@ def smiles_helper(mol, atom):
         out += "["+str(atom)+stereo_str+"]"
     else:
         out += str(atom)
+    for bond_type, label in mol.ring_bonds.get(atom,[]):
+        out += str(bond_type) + str(label)
     if len(children) > 1:
         for c in children[:-1]:
             out += "(" + smiles_helper(mol,c) + ")"
@@ -583,24 +619,6 @@ def find_substructure(substruct, mol):
             pass
 
     return match_substructure_helper(substruct, mol, possibilities, {}, {})
-    #match the first atom
-    # q = collections.deque()
-    # done = {}
-    # q.append(matches.keys()[0])
-    # while q:
-    #     next_atom = q.popleft()
-    #     if next_atom in done:
-    #         continue
-    #     #try to match this atom
-    #     for bond_type, neighbor in next_atom.bonds:
-    #         pass
-    #first check which atom from sub_mol is the hardest to match in mol 
-    # for a in sub_mol.atoms:
-    #     cnts = counter(a.bond_summaries())
-    #     matches = []
-    #     for b in mol_cnts:
-    #         for k,v in cnts.items():
-    # pass
 
 def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
     """matches = [(atom from sub_mol, mapped atom from mol)]"""
@@ -612,6 +630,14 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
             for neighbor, bond_type in sub_mol.ordered_bonds[a1]:
                 if not (matches[neighbor], bond_type) in mol.ordered_bonds[b1]:
                     return [] #no match!
+            #check chirality if necessary
+            if a1 in sub_mol.chirality and matches[a1] in mol.chirality:
+                atoms1 = [matches[n] for n,_ in sub_mol.ordered_bonds[a1]]
+                atoms2 = [n for n,_ in mol.ordered_bonds[matches[a1]]]
+                order_match = compare_stereochemistry(atoms1,atoms2)
+                chirality_match = 1 * (sub_mol.chirality[a1] == mol.chirality[matches[a1]])
+                if order_match != chirality_match:
+                    return []
         return [matches.copy()]
 
     #recursion
@@ -643,7 +669,8 @@ def test_mol_to_smiles():
     s = 'CC(Br)CC'
     m = Molecule(s)
     s_out = mol_to_smiles(m)
-    assert(s_out == s)
+    m_out = Molecule(s_out)
+    assert(m_out == m)
 
 def test_substructure():
     m1 = Molecule("CCC(Br)CI")
@@ -679,11 +706,21 @@ def rxn_setup():
 
     all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", ['[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]'])
     
-    # halohydrin_formation = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
-    # oxymercuration = Retro("Oxymercuration", ['[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
+    all_retros["oxymercuration"] = Retro("Oxymercuration", ['[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+
+    all_retros["hydroboration"] = Retro("Hydroboration", ['[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]', '[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]'])
+
+    all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", ['[CH2:1][CH3:2]>>[CH1:1]=[CH2:2]', '[CH3:1][CH3:2]>>[CH2:1]=[CH2:2]', '[CH1:1][CH3:2]>>[CH1:1]=[CH2:2]', '[CH2:1][CH2:2]>>[CH:1]=[CH:2]', '[CH2:1][CH:2]>>[CH:1]=[CH0:2]', '[CH:1][CH:2]>>[CH0:1]=[CH0:2]'])
+
+    all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", ['[C:1]([OH])[C:2]([OH])>>[C:1]=[C:2]'])
+
+    all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", ['[C:1]C(Cl)(Cl)[C:2]>>[C:1]=[C:2]'])
+
+    all_retros["simmons_smith"] = Retro("Simmons-Smith", ['[C:1]1[CH2][C:2]1>>[C:1]=[C:2]'])
+    
 def test_retro():
-
     print "Creating reactant"
     start1 = Molecule("CC(C)(Br)CO")
     print "running retro:"
@@ -700,7 +737,6 @@ def test_retro():
     
     print all_retros["halohydrin_formation"].run([start1])[0] == Molecule("CC(C)=C")
     assert(all_retros["halohydrin_formation"].run([start1]) == [Molecule("CC(C)=C")])
-
 
     start2 = Molecule("CC(C)(Br)COC")
     assert(all_retros["halohydrin_formation"].run([start2])[0] == start2)
@@ -720,15 +756,73 @@ def test_reactions():
     #TODO:
     #smarter SMILES printing: eg
     #C(CC(C)O)C
-    #better as
+    #would look better as
     #CCCC(O)C
-    print all_retros["alcohol_dehydration"].run([start1])[0]
+    end = [Molecule("CCCCCO"),Molecule("CCCC(O)C")]
+    assert(all([output in end for output in all_retros["alcohol_dehydration"].run([start1])]))
+
+    #[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]
+    start1 = Molecule("C[C@@](F)(Cl)[C@](F)(C)C")
+    assert(all_retros["alkene_plus_x2"].run([start1])[0] == Molecule("ClC(C)=C(C)C"))
+
+    start1 = Molecule("CC(C)(Br)CO")
+    end1 = Molecule("CC(C)=C")
+    assert(all_retros["halohydrin_formation"].run([start1])[0] == end1)
+
+    start1 = Molecule("CC(O)C(Br)(I)")
+    end1 = Molecule("C(C)=C(Br)I")
+    assert(all_retros["oxymercuration"].run([start1])[0] == end1)
+
+    start1 = Molecule("C(Br)(Br)C")
+    end1 = Molecule("C(Br)(Br)=C")
+    assert(all_retros["alkene_hydrogenation"].run([start1])[0] == end1)
+
+    start1 = Molecule("BrC(Br)(Br)C(Br)(Br)")
+    end1 = start1
+    assert(all_retros["alkene_hydroxylation"].run([start1])[0] == end1)
     
+    start1 = Molecule("OCCO")
+    end1 = Molecule("C=C")
+    assert(all_retros["alkene_hydroxylation"].run([start1])[0] == end1)
+
+    start1 = Molecule("CC(Cl)(Cl)C")
+    end1 = Molecule("C=C")
+    assert(all_retros["dichlorocarbene_addition"].run([start1])[0] == end1)
+
+    start1 = Molecule("")
+    end1 = Molecule("")
+    
+    
+def test_chirality():
+    a1 = Molecule("C[C@@](Br)(Cl)I")
+    a2 = Molecule("C[C@@](Cl)(Br)I")
+    assert(not find_substructure(a1,a2))
+
+    a1 = Molecule("C[C@@](Br)(Cl)I")
+    a2 = Molecule("C[C@](Cl)(Br)I")
+    assert(find_substructure(a1,a2))
+
+    test_rxn = Reaction("C[C@](Cl)(Br)I >> C[C@@](Cl)(Br)I")
+    test_rxn2 = Reaction("C[C@](Br)(Cl)I >> C[C@](Cl)(Br)I")
+    r = Molecule("C[C@](Cl)(Br)I")
+    out = test_rxn.run((r,))[0][0]
+    out2 = test_rxn2.run((out,))[0][0]
+    assert(r != out)
+    assert(r == out2)
+    
+def test_smiles_ring_bonds():
+    a1 = Molecule("C1CCC1")
+    print a1.bond_summary_str()
+
+def test_copy():
+    m = Molecule("[C:1]1CCC1")
+    m.setup_dfs()
+    m2 = m.copy()
+    print m2 == m
     
 if __name__ == "__main__":
-    # m1 = smiles_to_mol("CCC(Br)CI")
     # print mol_to_smiles(m1)
 
     # test_reactions()
-    print Molecule("C[C@](Br)(Cl)I")
-    
+    # test_smiles_ring_bonds()
+    # print list(get_chunks("[C:1]1CCC1"))
