@@ -28,11 +28,13 @@ class Structure(object):
         self.ordered_bonds = {} #atom1 -> [(atom2,bond_type)]
 
         #when the ring_bonds are removed,
-        #the rest of the nodes form a tree
+        #the rest of the nodes form a tree (forest)
         self.children = {}
         self.parent = {}
         self.ring_bonds = {} #used by DFS: {atom1: [(bond_type,label_number)]}
         self.chirality = {}
+        self.atom2component = {} #atom : component#
+        self.component2root = {} #component# : atom
         
         self.ring_bond_labels = {} #{label: [(atom,bond_type)]}
     def append_smiles_clause(self, smiles_clause, atom = None, template=False):
@@ -45,10 +47,11 @@ class Structure(object):
                 self.append_smiles_clause(clause, atom, template=template)
                 continue
             if "[" in chunk:
-                bond_string, main, ring_bond_label = re.findall(r"^([{BOND_CHARS}]?)\[(.*)\]([{BOND_CHARS}]?\d*)$".format(**globals()),chunk)[0]
+                bond_string, main, ring_bond_label = re.findall(r"^([{Bond.all_bond_regex}]?)\[(.*)\]([{Bond.all_bond_regex}]?\d*)$".format(**globals()),chunk)[0]
                 #add
             else:
-                bond_string, main, ring_bond_label = re.findall(r"^([{BOND_CHARS}]?)(.*?)([{BOND_CHARS}]?\d*)$".format(**globals()),chunk)[0]
+                bond_string, main, ring_bond_label = re.findall(r"^([{Bond.all_bond_regex}]?)(.*?)([{Bond.all_bond_regex}]?\d*)$".format(**globals()),chunk)[0]
+            print "bond string: " , bond_string
             atom_string, label = parse_atom(main)
             if template:
                 next_atom = AtomPattern(atom_string, self)
@@ -61,9 +64,11 @@ class Structure(object):
             if label: #C:1
                 self.label2atom[label] = next_atom
                 self.atom2label[next_atom] = label
-            b = Bond(bond_string)
-            if atom:
-                self.add_bond(atom, next_atom,b)
+
+            if bond_string in Bond.valid_bond_strings:
+                b = Bond(bond_string)
+                if atom:
+                    self.add_bond(atom, next_atom,b)
 
             #add ring_bond_label
             if ring_bond_label:
@@ -168,42 +173,50 @@ class Structure(object):
         self.children = {}
         self.parent = {}
         self.ring_bonds = {}
-        if not self.atoms:
-            return
+        self.atom2component = {}
+        self.component2root = {}
+        curr_component = 1
+        curr_ring_label = 1
         done = set()
         stack = collections.deque()
-        stack.append((self.atoms[0],None,None))
-        next_ring_label = 1
-        while stack:
-            curr_atom, parent, bond_type = stack.pop()
-            if curr_atom in done:
-                #second time we've reached this atom --> ring bond!
-                self.ring_bonds.setdefault(curr_atom,[]).append((bond_type, next_ring_label))
-                self.ring_bonds.setdefault(parent,[]).append((bond_type, next_ring_label))
-                next_ring_label += 1
-            else:
-                if parent:
-                    self.parent[curr_atom] = parent
-                    self.children.setdefault(parent,[]).append(curr_atom)
+        while len(self.atom2component) < len(self.atoms):
+            #find next atom to start dfs from
+            for a in self.atoms:
+                if a not in self.atom2component:
+                    if self.component2root:
+                        curr_component = max(self.component2root.keys()) + 1
+                    self.component2root[curr_component] = a
+                    self.atom2component[a] = curr_component
+                    stack.append((a,None,None))
+                    break
+            #run dfs from that node
+            while stack:
+                curr_atom, parent, bond_type = stack.pop()
+                if curr_atom in done:
+                    #second time we've reached this atom --> ring bond!
+                    self.ring_bonds.setdefault(curr_atom,[]).append((bond_type, curr_ring_label))
+                    self.ring_bonds.setdefault(parent,[]).append((bond_type, curr_ring_label))
+                    curr_ring_label += 1
+                else:
+                    if parent:
+                        self.parent[curr_atom] = parent
+                        self.children.setdefault(parent,[]).append(curr_atom)
 
-                #expand all edges exactly once
-                for neighbor, bond_type in self.ordered_bonds[curr_atom]:
-                    if neighbor in done: continue #don't process the same edge twice
-                    stack.append((neighbor, curr_atom, bond_type))
-                
-                done.add(curr_atom)
-    def dfs(self, start_node=None):
-        if not start_node and self.atoms:
-            start_node = self.atoms[0]
-        else:
-            return
-        stack = collections.deque()
-        stack.append(start_node)
-        while stack:
-            next_atom = stack.pop()
-            for a in self.children.get(next_atom,[]):
-                stack.append(a)
-            yield next_atom
+                    #expand all edges exactly once
+                    for neighbor, bond_type in self.ordered_bonds.get(curr_atom,[]):
+                        if neighbor in done: continue #don't process the same edge twice
+                        stack.append((neighbor, curr_atom, bond_type))
+                    self.atom2component[curr_atom] = curr_component
+                    done.add(curr_atom)
+    def dfs(self):
+        for start_node in self.atom2component:
+            stack = collections.deque()
+            stack.append(start_node)
+            while stack:
+                next_atom = stack.pop()
+                for a in self.children.get(next_atom,[]):
+                    stack.append(a)
+                yield next_atom
     def __str__(self):
         return mol_to_smiles(self)
     def bond_str(self):
@@ -253,6 +266,9 @@ def map_labels(mol1, mol2):
 class Reaction(object):
     def __init__(self, smarts):
         self.smarts = smarts
+        #http://www.daylight.com/dayhtml/doc/theory/theory.smarts.html
+        #4.5 Component-level grouping of SMARTS
+        #C.(C.C)
         smiles1, smiles2 = smarts.split(">>",1)
         smiles1 = smiles1.strip(); smiles2 = smiles2.strip()
         self.reactant_template = Substructure(smiles1)
@@ -443,6 +459,8 @@ class AtomPattern(AtomType):
     
     
 class Bond(object):
+    all_bond_regex = "~=#\."
+    valid_bond_strings = "~=#"
     def __init__(self, bond_string):
         self.bond_string = bond_string
         if not bond_string:
@@ -467,13 +485,13 @@ def take_next(smiles):
         branch, rest = re.findall(r"^(\(.*?\))(.*)$",smiles)[0]
         return branch, rest
 
-    re_MAIN = r"^([{BOND_CHARS}]?(Cl|Br|O|I|C|F)\d*)(.*)$".format(**globals())
+    re_MAIN = r"^([{Bond.all_bond_regex}]?(Cl|Br|O|I|C|F)\d*)(.*)$".format(**globals())
     m_main = re.findall(re_MAIN,smiles)
     if m_main:
         main, _, rest = m_main[0]
         return main, rest
 
-    re_BRACKET = r"^([{BOND_CHARS}]?\[.*?\]\d*)(.*)$".format(**globals())
+    re_BRACKET = r"^([{Bond.all_bond_regex}]?\[.*?\]\d*)(.*)$".format(**globals())
     m_bracket = re.findall(re_BRACKET, smiles)
     if m_bracket:
         bracket, rest = m_bracket[0]
@@ -483,10 +501,9 @@ def take_next(smiles):
 def get_chunks(smiles):
     while smiles:
         chunk, smiles = take_next(smiles)
+        print chunk, smiles
         if not chunk: raise
         yield chunk
-
-BOND_CHARS = "~=#"
 
 def parse_atom(main):
     if ":" in main:
@@ -500,7 +517,8 @@ def mol_to_smiles(mol):
     mol.setup_dfs()
     if not mol.atoms:
         return ""
-    return smiles_helper(mol,mol.atoms[0])
+    component_smiles = [smiles_helper(mol, r) for _,r in mol.component2root.items()]
+    return ".".join(component_smiles)
 
 def compare_stereochemistry(bonded_atoms1, bonded_atoms2):
     #return 1 if two lists of bonded atoms are in the same orientation
@@ -545,7 +563,7 @@ def smiles_helper(mol, atom):
         out += str(mol.bonds[atom][parent])
     #check how the dfs ordering compares with the stereochemistry:
     stereo_str = ""
-    if len(mol.bonds[atom]) == 4 and atom in mol.chirality:
+    if len(mol.bonds.get(atom,[])) == 4 and atom in mol.chirality:
         mol_neighbors = [n for n,_ in mol.ordered_bonds[atom]]
         smiles_neighbors = []
         if mol.parent.get(atom,None):
@@ -719,6 +737,8 @@ def rxn_setup():
     all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", ['[C:1]C(Cl)(Cl)[C:2]>>[C:1]=[C:2]'])
 
     all_retros["simmons_smith"] = Retro("Simmons-Smith", ['[C:1]1[CH2][C:2]1>>[C:1]=[C:2]'])
+
+    all_retros["ozonolysis"] = Retro("Ozonolysis", ["[C:1]=O.[C:2]=O >> [C:1]=[C:2]"])
     
 def test_retro():
     print "Creating reactant"
@@ -789,9 +809,11 @@ def test_reactions():
     end1 = Molecule("C=C")
     assert(all_retros["dichlorocarbene_addition"].run([start1])[0] == end1)
 
-    start1 = Molecule("")
-    end1 = Molecule("")
-    
+    start1 = Molecule("CCC1CC1")
+    end1 = Molecule("CCC=C")
+    assert(all_retros["simmons_smith"].run([start1])[0] == end1)
+
+
     
 def test_chirality():
     a1 = Molecule("C[C@@](Br)(Cl)I")
@@ -826,3 +848,15 @@ if __name__ == "__main__":
     # test_reactions()
     # test_smiles_ring_bonds()
     # print list(get_chunks("[C:1]1CCC1"))
+    # test_reactions()
+
+
+    # reactants = []
+    # esterification = Reaction("C(=O)O.OCC>>C(=O)OCC.O")
+    # print esterification.run(reactants)
+
+    # m= Molecule("C(=O)O.OCC") #>>C(=O)OCC.O")
+    # m.setup_dfs()
+    # print m
+
+    print Molecule("C.C.C")
