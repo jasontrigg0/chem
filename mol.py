@@ -92,6 +92,46 @@ class Structure(object):
                     self.add_bond(a1,a2,b1)
             self.atoms.append(next_atom)
             atom = self.last_atom()
+    @classmethod
+    def merge(cls, list_of_structures):
+        """
+        combine multiple structures into
+        one structure with multiple components
+        """
+        out = object.__new__(cls)
+        out.setup()
+        out.atoms = [a for s in list_of_structures for a in s.atoms]
+        for s in list_of_structures:
+            out.chirality.update(s.chirality)
+            if s.atom2label:
+                raise
+            if s.label2atom:
+                raise
+            out.bonds.update(s.bonds)
+            out.ordered_bonds.update(s.ordered_bonds)
+        out.setup_dfs()
+        return out
+    def split(self):
+        """
+        Return list of components as individual structures
+        """
+        self.setup_dfs()
+        out = []
+        for component in self.component2root:
+            obj = object.__new__(self.__class__)
+            obj.setup()
+            obj.atoms = [a for a in self.atoms if self.atom2component[a] == component]
+            component_atoms = set(obj.atoms)
+            obj.atom2label = dict((a,l) for a,l in self.atom2label.items() if a in component_atoms)
+            obj.label2atom = dict((l,a) for l,a in self.label2atom.items() if a in component_atoms)
+            obj.chirality = dict((a,c) for a,c in self.chirality.items() if a in component_atoms)
+            obj.bonds = dict((a,v) for a,v in self.bonds.items() if a in component_atoms)
+            obj.ordered_bonds = dict((a,v) for a,v in self.ordered_bonds.items() if a in component_atoms)
+            obj.setup_dfs()
+            out.append(obj)
+        return out
+
+    
     def copy(self):
         #return
         #copied_object, along with a map from old atoms to new atoms
@@ -123,14 +163,7 @@ class Structure(object):
             for a2,bond in v.items():
                 out.add_bond(atom_map[a],atom_map[a2],bond)
 
-
-        for a1,l in self.children.items():
-            out.children[atom_map[a1]] = [atom_map[a2] for a2 in l]
-
-        out.parent = dict((atom_map[a1],atom_map[a2]) for a1,a2 in self.parent.items())
-
-        for a1,v in self.ring_bonds.items():
-            out.ring_bonds.setdefault(atom_map[a1],[]).append(v)
+        out.setup_dfs()
         return out, atom_map
     
     def last_atom(self):
@@ -256,9 +289,17 @@ class Molecule(Structure):
         #parse the smiles clause and add atom-by-atom
         self.append_smiles_clause(smiles, template=False)
     def __eq__(self, other):
+        if not type(self) == type(other):
+            return False
         return (len(self.atoms) == len(other.atoms)) and (find_substructure(self, other) != [])
     def __ne__(self, other):
         return not self == other
+    def __hash__(self):
+        rdkit_mol = Chem.MolFromSmiles(mol_to_smiles(self))
+        new_print = FingerprintMols.FingerprintMol(rdkit_mol)
+        num_bits = new_print.GetNumBits()
+        bits = "".join([str(1 *new_print.GetBit(i)) for i in range(num_bits)])
+        return int(bits,2)
 
 class Substructure(Structure):
     """
@@ -290,10 +331,10 @@ class Substructure(Structure):
         to_delete = []
         for i,c in enumerate(smiles):
             if depth == 0 and c == "(":
-                if i==0 or smiles[i-1] == ".":
+                if i > 0 and smiles[i-1] == ".":
                     to_delete.append(i)
             if depth == 1 and c == ")":
-                if i==(len(smiles)-1) or smiles[i+1] == ".":
+                if i < (len(smiles)-1) and smiles[i+1] == ".":
                     to_delete.append(i)
             if c == "(":
                 depth += 1
@@ -330,7 +371,7 @@ class Reaction(object):
         self.reactant_template = Substructure(smiles1)
         self.product_template = Substructure(smiles2)
     def run(self, reactants_tuple):
-        reactants_mol = reactants_tuple[0]
+        reactants_mol = Molecule.merge(reactants_tuple)
         mappings = find_substructure(self.reactant_template, reactants_mol)
         out = []
         for m_basic in mappings:
@@ -371,14 +412,21 @@ class Reaction(object):
 
             #add all the reaction product bonds:
             for a2 in self.product_template.atoms:
-                for neighbor, bond_type in self.product_template.ordered_bonds[a2]:
+                for neighbor, bond_type in self.product_template.ordered_bonds.get(a2,[]):
                     if not neighbor in products_map:
                         # print "missing from mapping!"
                         #create new atom and add to mapping
                         new_atom = add_atom_copy(neighbor, mol_to_transform)
                         products_map[neighbor] = new_atom
                     mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
-            product_set = (mol_to_transform,)
+            #update mol_to_transform.chirality:
+            #atoms with < 4 bonds no longer have chirality
+            for a in mol_to_transform.atoms:
+                if a in mol_to_transform.chirality and len(mol_to_transform.ordered_bonds.get(a,[])) < 4:
+                    mol_to_transform.chirality.pop(a)
+
+
+            product_set = tuple(mol_to_transform.split(),)
             out.append(product_set)
         return out
     def __str__(self):
@@ -391,6 +439,10 @@ class Retro(object):
     def __str__(self):
         return self.name
     def run(self, reactants):
+        if not (isinstance(reactants,tuple) or isinstance(reactants,list)):
+            raise
+        if not all([isinstance(r,Structure) for r in reactants]):
+            raise
         return Retro.run_once(reactants,self.rxn_list)
     @classmethod
     def run_to_completion(cls, reactants, rxn_list):
@@ -417,34 +469,12 @@ class Retro(object):
             return (reactants,)
     @classmethod
     def run_once(cls, reactants, rxn_list):
-        try:
-            products = [p for product_set in cls.run_rxn_list(rxn_list, tuple(reactants)) for p in product_set]
-        except ValueError, e:
-            #invalid number of reactants
-            return reactants
-        # for m in products:
-        #     print Chem.MolToSmiles(m)
-        #     Chem.SanitizeMol(m)
-        products = cls.drop_duplicates(products)
-        if products:
-            return products
+        product_sets = cls.run_rxn_list(rxn_list, tuple(reactants))
+        product_sets = list(set(product_sets))
+        if product_sets:
+            return product_sets
         else:
-            return reactants
-    @classmethod
-    def drop_duplicates(cls, mol_list):
-        prints = []
-        out = []
-        for m in mol_list:
-            rdkit_mol = Chem.MolFromSmiles(mol_to_smiles(m))
-            new_print = FingerprintMols.FingerprintMol(rdkit_mol)
-            if any([new_print == p for p in prints]):
-                continue
-            prints.append(new_print)
-            out.append(m)
-        return out
-    @classmethod
-    def equal(cls, mol_list1, mol_list2):
-        return len(cls.drop_duplicates(mol_list1 + mol_list2)) == len(mol_list1)
+            return [tuple(reactants)]
 
 class AtomType(object):
     def __init__(self, name, struct):
@@ -799,6 +829,9 @@ def rxn_setup():
     all_retros["simmons_smith"] = Retro("Simmons-Smith", ['[C:1]1[CH2][C:2]1>>[C:1]=[C:2]'])
 
     all_retros["ozonolysis"] = Retro("Ozonolysis", ["[C:1]=O.[C:2]=O >> [C:1]=[C:2]"])
+
+    # all_retros["esterification"] = Retro("esterification",["C(=O)O.OCC>>C(=O)OCC.O"]))
+
     
 def test_retro():
     print "Creating reactant"
@@ -826,7 +859,7 @@ def test_reactions():
     
     #hydrobromination
     start1 = Molecule("CC(C)(Br)C")
-    assert(all_retros["hydrobromination"].run([start1])[0] == Molecule("CC(C)=C"))
+    assert(all_retros["hydrobromination"].run([start1])[0] == (Molecule("CC(C)=C"),))
 
     #dehydrohalogenation
     # start1 = Molecule("CCBr")
@@ -839,39 +872,44 @@ def test_reactions():
     #would look better as
     #CCCC(O)C
     end = [Molecule("CCCCCO"),Molecule("CCCC(O)C")]
-    assert(all([output in end for output in all_retros["alcohol_dehydration"].run([start1])]))
+    assert(all([output in end for output in all_retros["alcohol_dehydration"].run([start1])[0]]))
 
     #[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]
-    start1 = Molecule("C[C@@](F)(Cl)[C@](F)(C)C")
-    assert(all_retros["alkene_plus_x2"].run([start1])[0] == Molecule("ClC(C)=C(C)C"))
+    start1 = (Molecule("C[C@@](F)(Cl)[C@](F)(C)C"),)
+    end1 = (Molecule("ClC(C)=C(C)C"),)
+    assert(all_retros["alkene_plus_x2"].run(start1)[0] == end1)
 
-    start1 = Molecule("CC(C)(Br)CO")
-    end1 = Molecule("CC(C)=C")
-    assert(all_retros["halohydrin_formation"].run([start1])[0] == end1)
+    start1 = (Molecule("CC(C)(Br)CO"),)
+    end1 = (Molecule("CC(C)=C"),)
+    assert(all_retros["halohydrin_formation"].run(start1)[0] == end1)
 
-    start1 = Molecule("CC(O)C(Br)(I)")
-    end1 = Molecule("C(C)=C(Br)I")
-    assert(all_retros["oxymercuration"].run([start1])[0] == end1)
+    start1 = (Molecule("CC(O)C(Br)(I)"),)
+    end1 = (Molecule("C(C)=C(Br)I"),)
+    assert(all_retros["oxymercuration"].run(start1)[0] == end1)
 
-    start1 = Molecule("C(Br)(Br)C")
-    end1 = Molecule("C(Br)(Br)=C")
-    assert(all_retros["alkene_hydrogenation"].run([start1])[0] == end1)
+    start1 = (Molecule("C(Br)(Br)C"),)
+    end1 = (Molecule("C(Br)(Br)=C"),)
+    assert(all_retros["alkene_hydrogenation"].run(start1)[0] == end1)
 
-    start1 = Molecule("BrC(Br)(Br)C(Br)(Br)")
+    start1 = (Molecule("BrC(Br)(Br)C(Br)(Br)"),)
     end1 = start1
-    assert(all_retros["alkene_hydroxylation"].run([start1])[0] == end1)
+    assert(all_retros["alkene_hydroxylation"].run(start1)[0] == end1)
     
-    start1 = Molecule("OCCO")
-    end1 = Molecule("C=C")
-    assert(all_retros["alkene_hydroxylation"].run([start1])[0] == end1)
+    start1 = (Molecule("OCCO"),)
+    end1 = (Molecule("C=C"),)
+    assert(all_retros["alkene_hydroxylation"].run(start1)[0] == end1)
 
-    start1 = Molecule("CC(Cl)(Cl)C")
-    end1 = Molecule("C=C")
-    assert(all_retros["dichlorocarbene_addition"].run([start1])[0] == end1)
+    start1 = (Molecule("CC(Cl)(Cl)C"),)
+    end1 = (Molecule("C=C"),)
+    assert(all_retros["dichlorocarbene_addition"].run(start1)[0] == end1)
 
-    start1 = Molecule("CCC1CC1")
-    end1 = Molecule("CCC=C")
-    assert(all_retros["simmons_smith"].run([start1])[0] == end1)
+    start1 = (Molecule("CCC1CC1"),)
+    end1 = (Molecule("CCC=C"),)
+    assert(all_retros["simmons_smith"].run(start1)[0] == end1)
+
+    start1 = [Molecule("BrC=O"),Molecule("ClC=O")]
+    end1 = (Molecule("ClC=CBr"),)
+    assert(all_retros["ozonolysis"].run(start1)[0] == end1)
 
 
     
@@ -923,24 +961,34 @@ def test_inter_intra_component():
     m = Molecule("CCCCCC")
     assert(find_substructure(s,m))
 
+
+def test_merge_split():
+    m1 = Molecule("CCC")
+    m2 = Molecule("CCC")
+    m3 = Molecule("CCC")
+    mout = Molecule("CCC.CCC.CCC")
+    assert(Molecule.merge([m1,m2,m3]) == mout) #yikes this is slow
+
+    m1 = Molecule("C1CC1")
+    m2 = Molecule("C2CC2")
+    m3 = Molecule("C3CC3")
+    mout = Molecule("C1CC1.C2CC2.C3CC3")
+    assert(Molecule.merge([m1,m2,m3]) == mout) #yikes this is slow
+
+    mout = Molecule("C2CC2.CCCI.CC(Br)(Br)C")
+    for o in  mout.split():
+        print o
     
 if __name__ == "__main__":
     # print mol_to_smiles(m1)
 
-    # test_reactions()
     # test_smiles_ring_bonds()
     # print list(get_chunks("[C:1]1CCC1"))
-    # test_reactions()
 
-
-    # reactants = []
-    # esterification = Reaction("C(=O)O.OCC>>C(=O)OCC.O")
-    # print esterification.run(reactants)
 
     # m= Molecule("C(=O)O.OCC") #>>C(=O)OCC.O")
     # m.setup_dfs()
-    # print m
+    # print m.split()[1]
 
-    # m = Molecule("CCCCC")
-    # s1 = Substructure("C.C.C")
+    test_reactions()
 
