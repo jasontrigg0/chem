@@ -27,6 +27,12 @@ class Structure(object):
         self.bonds = {} #atom1 -> atom2 -> bond_type (bonds are symmetric)
         self.ordered_bonds = {} #atom1 -> [(atom2,bond_type)]
 
+        #component_bonds maintains a list of componant constraints
+        #in the case of templates
+        #ie atom1, atom2 must be in the same component (1)
+        #or atom1, atom2 must be in different components (0)
+        self.component_bonds = {} #atom1 -> [(atom2, is_same_component_boolean)]
+        
         #when the ring_bonds are removed,
         #the rest of the nodes form a tree (forest)
         self.children = {}
@@ -51,7 +57,6 @@ class Structure(object):
                 #add
             else:
                 bond_string, main, ring_bond_label = re.findall(r"^([{Bond.all_bond_regex}]?)(.*?)([{Bond.all_bond_regex}]?\d*)$".format(**globals()),chunk)[0]
-            print "bond string: " , bond_string
             atom_string, label = parse_atom(main)
             if template:
                 next_atom = AtomPattern(atom_string, self)
@@ -69,7 +74,10 @@ class Structure(object):
                 b = Bond(bond_string)
                 if atom:
                     self.add_bond(atom, next_atom,b)
-
+            elif re.findall("["+Bond.all_bond_regex+"]",bond_string):
+                if atom:
+                    self.add_component_bond(atom, next_atom, bond_string)
+            
             #add ring_bond_label
             if ring_bond_label:
                 self.ring_bond_labels.setdefault(ring_bond_label,[]).append((next_atom, b))
@@ -138,6 +146,14 @@ class Structure(object):
         #adding bond
         self.ordered_bonds.setdefault(atom1,[]).append((atom2,bond_type))
         self.ordered_bonds.setdefault(atom2,[]).append((atom1,bond_type))
+    def add_component_bond(self, atom1, atom2, bond_string):
+        if bond_string == INTER_CHAR:
+            is_same_component_boolean = 0
+        elif bond_string == INTRA_CHAR:
+            is_same_component_boolean = 1
+        else:
+            return
+        self.component_bonds.setdefault(atom1,[]).append((atom2, is_same_component_boolean))
     def bond_summary(self, atom):
         out = []
         for a2, bond_type in self.ordered_bonds.get(atom,[]):
@@ -243,14 +259,54 @@ class Molecule(Structure):
         return (len(self.atoms) == len(other.atoms)) and (find_substructure(self, other) != [])
     def __ne__(self, other):
         return not self == other
-    
+
 class Substructure(Structure):
     """
     """
     def __init__(self,smiles):
         super(Substructure,self).__init__()
+        smiles = self.preprocess_smiles(smiles)
         self.append_smiles_clause(smiles, template=True)
+    @classmethod
+    def preprocess_smiles(self, smiles):
+        #substructures have special meaning for "."
+        #in different contexts
+        #preprocess the smiles string for these cases
 
+        #list of which locations represent specifically bonds within or between components
+        inter = []
+        intra = []
+        for i,c in enumerate(smiles):
+            if c == ".":
+                left_cnt = len([c2 for c2 in smiles[:i] if c2 == "("])
+                right_cnt = len([c2 for c2 in smiles[:i] if c2 == ")"])
+                if left_cnt > right_cnt:
+                    intra.append(i)
+                elif smiles[i-1] == ")" and smiles[i+1] == "(":
+                    inter.append(i)
+
+        #remove the top-level parentheses
+        depth = 0
+        to_delete = []
+        for i,c in enumerate(smiles):
+            if depth == 0 and c == "(":
+                if i==0 or smiles[i-1] == ".":
+                    to_delete.append(i)
+            if depth == 1 and c == ")":
+                if i==(len(smiles)-1) or smiles[i+1] == ".":
+                    to_delete.append(i)
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+
+        for i in inter:
+            smiles = smiles[:i] + INTER_CHAR + smiles[i+1:]
+        for i in intra:
+            smiles = smiles[:i] + INTRA_CHAR + smiles[i+1:]
+        smiles = [s for i,s in enumerate(smiles) if i not in to_delete]
+        smiles = "".join(smiles)
+        return smiles
         
 def map_labels(mol1, mol2):
     """use the labels in mol1, mol2 to
@@ -420,7 +476,7 @@ class Atom(AtomType):
         }
         return elt2cnt[self.name]
     def cur_bond_cnt(self):
-        return len(self.struct.bonds[self])
+        return len(self.struct.bonds.get(self,[]))
     def get_hydrogen_cnt(self):
         return self.max_bond_cnt() - self.cur_bond_cnt()
     def matches_atom(self, atom):
@@ -457,9 +513,12 @@ class AtomPattern(AtomType):
             return True
         return False
     
+
+INTER_CHAR = "`"
+INTRA_CHAR = "'"
     
 class Bond(object):
-    all_bond_regex = "~=#\."
+    all_bond_regex = "~=#\." + INTER_CHAR + INTRA_CHAR
     valid_bond_strings = "~=#"
     def __init__(self, bond_string):
         self.bond_string = bond_string
@@ -501,7 +560,6 @@ def take_next(smiles):
 def get_chunks(smiles):
     while smiles:
         chunk, smiles = take_next(smiles)
-        print chunk, smiles
         if not chunk: raise
         yield chunk
 
@@ -606,6 +664,8 @@ def is_counter_subset(counter1, counter2):
 def find_substructure(substruct, mol):
     #atom -> (bond_type, atom_type) -> cnt
     # mol_cnts = dict((a,counter(a.bond_summaries())) for a in mol.atoms)
+    substruct.setup_dfs()
+    mol.setup_dfs()
     def is_bond_subset(atom1, atom2):
         #need a mapping from atom1's bonds to a subset of atom2's bonds
         bonds1 = atom1.bond_summary()
@@ -632,10 +692,6 @@ def find_substructure(substruct, mol):
             if a1.matches_atom(a2) and is_bond_subset(a1, a2):
                 possibilities.setdefault(a1,[]).append(a2)
 
-    for a1 in substruct.atoms:
-        for a2 in mol.atoms:
-            pass
-
     return match_substructure_helper(substruct, mol, possibilities, {}, {})
 
 def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
@@ -645,7 +701,7 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
     if len(matches) == len(sub_mol.atoms):
         for a1 in sub_mol.atoms:
             b1 = matches[a1]
-            for neighbor, bond_type in sub_mol.ordered_bonds[a1]:
+            for neighbor, bond_type in sub_mol.ordered_bonds.get(a1,[]):
                 if not (matches[neighbor], bond_type) in mol.ordered_bonds[b1]:
                     return [] #no match!
             #check chirality if necessary
@@ -655,6 +711,10 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
                 order_match = compare_stereochemistry(atoms1,atoms2)
                 chirality_match = 1 * (sub_mol.chirality[a1] == mol.chirality[matches[a1]])
                 if order_match != chirality_match:
+                    return []
+            for neighbor, is_same_component_boolean in sub_mol.component_bonds.get(a1,[]):
+                observed_same_component = (mol.atom2component[matches[a1]] == mol.atom2component[matches[neighbor]])
+                if observed_same_component != is_same_component_boolean:
                     return []
         return [matches.copy()]
 
@@ -841,6 +901,28 @@ def test_copy():
     m.setup_dfs()
     m2 = m.copy()
     print m2 == m
+
+def test_inter_intra_component():
+    s = Substructure("(CCCC.CC)")
+    m = Molecule("CCCC.CC")
+    assert(not find_substructure(s,m))
+
+    s = Substructure("CCCC.CC")
+    m = Molecule("CCCC.CC")
+    assert(find_substructure(s,m))
+
+    s = Substructure("(CCCC).(CC)")
+    m = Molecule("CCCC.CC")
+    assert(find_substructure(s,m))
+
+    s = Substructure("(CCCC).(CC)")
+    m = Molecule("CCCCCC")
+    assert(not find_substructure(s,m))
+
+    s = Substructure("CCCC.CC")
+    m = Molecule("CCCCCC")
+    assert(find_substructure(s,m))
+
     
 if __name__ == "__main__":
     # print mol_to_smiles(m1)
@@ -859,4 +941,6 @@ if __name__ == "__main__":
     # m.setup_dfs()
     # print m
 
-    print Molecule("C.C.C")
+    # m = Molecule("CCCCC")
+    # s1 = Substructure("C.C.C")
+
