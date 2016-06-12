@@ -9,8 +9,14 @@ import itertools
 
 from rdkit.Chem.Fingerprints import FingerprintMols
 from rdkit import Chem
+from rdkit import DataStructs
 
 logger = utils.Logger()
+
+
+#SMILES spec:
+#http://opensmiles.org/spec/open-smiles-3-input.html
+#(lots left to implement!)
 
 class Structure(object):
     """Representation of a molecular structure:
@@ -38,7 +44,23 @@ class Structure(object):
         self.children = {}
         self.parent = {}
         self.ring_bonds = {} #used by DFS: {atom1: [(bond_type,label_number)]}
+
+        #chirality of tetrahedral bonds
         self.chirality = {}
+
+        #store information about the cis-trans nature of C=C bonds
+        self.c_double_bonds = [] #[set([atom1,atom2])]
+        self.c_double_bond_atoms = set() #any atoms in a C=C bond
+        
+        #(atom1,atom2) -> [(atom3,atom4), (atom5, atom6)]
+        #where atom1, atom2 are double-bonded carbons
+        #and   atom3,atom4 are cis and atom5,atom6 are cis, etc
+        self.cis = {} 
+        self.trans = {} 
+
+        self.up_bonds = {} #atom1 -> [atom2]
+        self.down_bonds = {} #atom1 -> [atom2]
+        
         self.atom2component = {} #atom : component#
         self.component2root = {} #component# : atom
         
@@ -70,14 +92,18 @@ class Structure(object):
                 self.label2atom[label] = next_atom
                 self.atom2label[next_atom] = label
 
-            if bond_string in Bond.valid_bond_strings:
+            if bond_string in Bond.valid_bond_strings: #includes bond_string = ""
                 b = Bond(bond_string)
                 if atom:
                     self.add_bond(atom, next_atom,b)
-            elif re.findall("["+Bond.all_bond_regex+"]",bond_string):
+                if bond_string == Bond.up_bond:
+                    self.add_up_bond(atom, next_atom)
+                elif bond_string == Bond.down_bond:
+                    self.add_up_bond(next_atom,atom)
+            elif re.findall("["+Bond.all_bond_regex+"]",bond_string): #bond is "." or "`" or "'"
                 if atom:
                     self.add_component_bond(atom, next_atom, bond_string)
-            
+
             #add ring_bond_label
             if ring_bond_label:
                 self.ring_bond_labels.setdefault(ring_bond_label,[]).append((next_atom, b))
@@ -109,6 +135,16 @@ class Structure(object):
                 raise
             out.bonds.update(s.bonds)
             out.ordered_bonds.update(s.ordered_bonds)
+
+            out.c_double_bonds += s.c_double_bonds
+            out.c_double_bond_atoms.update(s.c_double_bond_atoms)
+        
+            out.cis.update(s.cis)
+            out.trans.update(s.trans)
+
+            out.up_bonds.update(s.up_bonds)
+            out.down_bonds.update(s.down_bonds)
+            
         out.setup_dfs()
         return out
     def split(self):
@@ -127,6 +163,15 @@ class Structure(object):
             obj.chirality = dict((a,c) for a,c in self.chirality.items() if a in component_atoms)
             obj.bonds = dict((a,v) for a,v in self.bonds.items() if a in component_atoms)
             obj.ordered_bonds = dict((a,v) for a,v in self.ordered_bonds.items() if a in component_atoms)
+            obj.c_double_bonds = [set([a1,a2]) for a1,a2 in self.c_double_bonds if a1 in component_atoms and a2 in component_atoms]
+            obj.c_double_bond_atoms = set([a for a in self.c_double_bond_atoms if a in component_atoms])
+        
+            obj.cis = dict((a,v) for a,v in self.cis.items() if a in component_atoms)
+            obj.trans = dict((a,v) for a,v in self.cis.items() if a in component_atoms)
+
+            obj.up_bonds = dict((a,v) for a,v in self.up_bonds.items() if a in component_atoms)
+            obj.down_bonds = dict((a,v) for a,v in self.down_bonds.items() if a in component_atoms)
+            
             obj.setup_dfs()
             out.append(obj)
         return out
@@ -163,6 +208,23 @@ class Structure(object):
             for a2,bond in v.items():
                 out.add_bond(atom_map[a],atom_map[a2],bond)
 
+
+        out.c_double_bonds = [set([atom_map[a1],atom_map[a2]]) for a1,a2 in self.c_double_bonds]
+        out.c_double_bond_atoms = set([atom_map[a] for a in self.c_double_bond_atoms])
+
+        out.cis = {}
+        for (a1,a2),v in self.cis.items():
+            v_out = [(atom_map[v1],atom_map[v2]) for v1,v2 in v]
+            out.cis[(atom_map[a1],atom_map[a2])] = v_out
+
+        out.trans = {}
+        for (a1,a2),v in self.trans.items():
+            v_out = [(atom_map[v1],atom_map[v2]) for v1,v2 in v]
+            out.trans[(atom_map[a1],atom_map[a2])] = v_out
+
+        out.up_bonds = dict([(atom_map[k],[atom_map[v] for v in vlist]) for k,vlist in self.up_bonds.items()])
+        out.down_bonds = dict([(atom_map[k],[atom_map[v] for v in vlist]) for k,vlist in self.down_bonds.items()])
+                
         out.setup_dfs()
         return out, atom_map
     
@@ -176,9 +238,88 @@ class Structure(object):
             return
         self.bonds.setdefault(atom1,{})[atom2] = bond_type
         self.bonds.setdefault(atom2,{})[atom1] = bond_type
-        #adding bond
+
         self.ordered_bonds.setdefault(atom1,[]).append((atom2,bond_type))
         self.ordered_bonds.setdefault(atom2,[]).append((atom1,bond_type))
+
+        if bond_type == Bond("=") and str(atom1) == "C" and str(atom2) == "C":
+            self.c_double_bonds.append(set([atom1,atom2]))
+            self.c_double_bond_atoms.add(atom1)
+            self.c_double_bond_atoms.add(atom2)
+
+        if atom1 in self.c_double_bond_atoms or atom2 in self.c_double_bond_atoms:
+            self.update_cis_trans()
+    def add_up_bond(self, atom1, atom2):
+        self.up_bonds.setdefault(atom1,[]).append(atom2)
+        self.down_bonds.setdefault(atom2,[]).append(atom1)
+        self.update_cis_trans()
+    def update_cis_trans(self):
+        #check all C=C bonds
+        for a1, a2 in self.c_double_bonds:
+            up1 = None
+            down1 = None
+            up2 = None
+            down2 = None
+            if a1 in self.up_bonds:
+                assert(len(self.up_bonds[a1]) == 1)
+                up1 = self.up_bonds[a1][0]
+                neighbors = self.bonds[a1].keys()
+                other_neighbors = [n for n in neighbors if n != a2 and n != up1]
+                assert(len(other_neighbors) <= 1)
+                if other_neighbors:
+                    down1 = other_neighbors[0]
+            if a1 in self.down_bonds:
+                assert(len(self.down_bonds[a1]) == 1)
+                down1 = self.down_bonds[a1][0]
+                neighbors = self.bonds[a1].keys()
+                other_neighbors = [n for n in neighbors if n != a2 and n != down1]
+                assert(len(other_neighbors) <= 1)
+                if other_neighbors:
+                    up1 = other_neighbors[0]
+            if a2 in self.up_bonds:
+                assert(len(self.up_bonds[a2]) == 1)
+                up2 = self.up_bonds[a2][0]
+                neighbors = self.bonds[a2].keys()
+                other_neighbors = [n for n in neighbors if n != a1 and n != up2]
+                assert(len(other_neighbors) <= 1)
+                if other_neighbors:
+                    down2 = other_neighbors[0]
+            if a2 in self.down_bonds:
+                assert(len(self.down_bonds[a2]) == 1)
+                down2 = self.down_bonds[a2][0]
+                neighbors = self.bonds[a2].keys()
+                other_neighbors = [n for n in neighbors if n != a1 and n != down2]
+                assert(len(other_neighbors) <= 1)
+                if other_neighbors:
+                    up2 = other_neighbors[0]
+
+            #save the cis/trans information
+            c1 = []
+            c2 = []
+            t1 = []
+            t2 = []
+            if up1 and up2:
+                c1.append((up1,up2))
+                c2.append((up2,up1))
+            if down1 and down2:
+                c1.append((down1,down2))
+                c2.append((down2,down1))
+            if up1 and down2:
+                t1.append((up1,down2))
+                t2.append((down2,up1))
+            if up2 and down1:
+                t1.append((down1,up2))
+                t2.append((up2,down1))
+            if c1:
+                self.cis[(a1,a2)] = c1
+            if c2:
+                self.cis[(a2,a1)] = c2
+            if t1:
+                self.trans[(a1,a2)] = t1
+            if t2:
+                self.trans[(a2,a1)] = t2
+            
+                        
     def add_component_bond(self, atom1, atom2, bond_string):
         if bond_string == INTER_CHAR:
             is_same_component_boolean = 0
@@ -295,11 +436,20 @@ class Molecule(Structure):
     def __ne__(self, other):
         return not self == other
     def __hash__(self):
-        rdkit_mol = Chem.MolFromSmiles(mol_to_smiles(self))
+        rdkit_mol = Chem.MolFromSmiles(str(self))
         new_print = FingerprintMols.FingerprintMol(rdkit_mol)
         num_bits = new_print.GetNumBits()
         bits = "".join([str(1 *new_print.GetBit(i)) for i in range(num_bits)])
         return int(bits,2)
+    def similarity(self, other):
+        if not isinstance(other, Molecule):
+            raise
+        rdkit1 = Chem.MolFromSmiles(str(self))
+        f_end = FingerprintMols.FingerprintMol(rdkit1)
+        rdkit2 = Chem.MolFromSmiles(str(other))
+        f_start = FingerprintMols.FingerprintMol(rdkit2)
+        sim = DataStructs.FingerprintSimilarity(f_end, f_start)
+        return sim
 
 class Substructure(Structure):
     """
@@ -437,7 +587,7 @@ class Retro(object):
         self.__name__ = name
         self.rxn_list = [Reaction(r) for r in rxn_string_list]
     def __str__(self):
-        return self.name
+        return self.__name__
     def run(self, reactants):
         if not (isinstance(reactants,tuple) or isinstance(reactants,list)):
             raise
@@ -485,16 +635,17 @@ class AtomType(object):
     @property
     def elt(self):
         for e in ["Cl","C","O","Br","I","F"]:
-            if self.name.replace("!","").startswith(e):
+            if self.name.replace("!","").startswith(e): #TODO: why replace "!" with "" ?????
                 return e
-        raise Exception("Couldn't parse AtomPattern " + self.name)
+        return None
     def __str__(self):
         return self.name
         
 class Atom(AtomType):
     """Name, Bonds/Neighbors, Orientation/Stereochemistry, Labels"""
-    # def bond_summaries(self):
-    #     return [(str(bond_type), str(a)) for bond_type, a in self.bonds]
+    def __init__(self, name, struct):
+        super(Atom,self).__init__(name, struct)
+        self.name = re.sub(r"H\d*","",self.name) #OH -> O
     def max_bond_cnt(self):
         elt2cnt = {"H":1,
                    "C":4,
@@ -506,7 +657,7 @@ class Atom(AtomType):
         }
         return elt2cnt[self.name]
     def cur_bond_cnt(self):
-        return len(self.struct.bonds.get(self,[]))
+        return sum(b.bond_cnt for b in self.struct.bonds.get(self,{}).values())
     def get_hydrogen_cnt(self):
         return self.max_bond_cnt() - self.cur_bond_cnt()
     def matches_atom(self, atom):
@@ -533,7 +684,7 @@ class AtomPattern(AtomType):
             raise
         pattern_hydrogen_cnt = self.parse_hydrogen_cnt()
         atom_hydrogen_cnt = atom.get_hydrogen_cnt()
-        if pattern_hydrogen_cnt and not pattern_hydrogen_cnt == atom_hydrogen_cnt:
+        if pattern_hydrogen_cnt  and not pattern_hydrogen_cnt == atom_hydrogen_cnt:
             return False
         if self.name == "*":
             return True
@@ -548,9 +699,13 @@ INTER_CHAR = "`"
 INTRA_CHAR = "'"
     
 class Bond(object):
-    all_bond_regex = "~=#\." + INTER_CHAR + INTRA_CHAR
-    valid_bond_strings = "~=#"
+    valid_bond_strings = r"~=#\\/"
+    all_bond_regex = valid_bond_strings + "\." + INTER_CHAR + INTRA_CHAR
+    up_bond = "\\"
+    down_bond = "/"
     def __init__(self, bond_string):
+        if bond_string in ("\\","/"):
+            bond_string = ""
         self.bond_string = bond_string
         if not bond_string:
             self.bond_cnt = 1
@@ -570,10 +725,13 @@ class Bond(object):
 
 def take_next(smiles):
     if smiles[0] == "(":
-        #TODO: below regex will fail on nested branches
-        branch, rest = re.findall(r"^(\(.*?\))(.*)$",smiles)[0]
-        return branch, rest
-
+        depth=0
+        for i,x in enumerate(smiles):
+            if x == "(": depth += 1
+            if x == ")": depth -= 1
+            if depth == 0:
+                return smiles[:(i+1)], smiles[(i+1):]
+        raise
     re_MAIN = r"^([{Bond.all_bond_regex}]?(Cl|Br|O|I|C|F)\d*)(.*)$".format(**globals())
     m_main = re.findall(re_MAIN,smiles)
     if m_main:
@@ -586,6 +744,7 @@ def take_next(smiles):
         bracket, rest = m_bracket[0]
         return bracket, rest
 
+    raise Exception("Unable to parse smiles substring: {smiles}".format(**vars()))
 
 def get_chunks(smiles):
     while smiles:
@@ -645,10 +804,16 @@ def opposite_chirality(c):
 def smiles_helper(mol, atom):
     """Compute smiles of a subsection of the molecule rooted at 'atom'"""
     children = mol.children.get(atom,[])
+    children = sorted(children,key=lambda x: len(mol.bonds.get(x,{})))
     parent = mol.parent.get(atom,None)
     out = ""
     if parent:
-        out += str(mol.bonds[atom][parent])
+        if atom in mol.up_bonds.get(parent,{}):
+            out += Bond.up_bond
+        elif atom in mol.down_bonds.get(parent,{}):
+            out += Bond.down_bond
+        else:
+            out += str(mol.bonds[atom][parent])
     #check how the dfs ordering compares with the stereochemistry:
     stereo_str = ""
     if len(mol.bonds.get(atom,[])) == 4 and atom in mol.chirality:
@@ -661,10 +826,11 @@ def smiles_helper(mol, atom):
             stereo_str = mol.chirality[atom]
         else:
             stereo_str = opposite_chirality(mol.chirality[atom])
-    if stereo_str:
-        out += "["+str(atom)+stereo_str+"]"
+    atom_str = str(atom)
+    if stereo_str or (atom_str != atom.elt):
+        out += "["+atom_str+stereo_str+"]"
     else:
-        out += str(atom)
+        out += atom_str
     for bond_type, label in mol.ring_bonds.get(atom,[]):
         out += str(bond_type) + str(label)
     if len(children) > 1:
@@ -734,7 +900,7 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
             for neighbor, bond_type in sub_mol.ordered_bonds.get(a1,[]):
                 if not (matches[neighbor], bond_type) in mol.ordered_bonds[b1]:
                     return [] #no match!
-            #check chirality if necessary
+            #check chirality if necessary:
             if a1 in sub_mol.chirality and matches[a1] in mol.chirality:
                 atoms1 = [matches[n] for n,_ in sub_mol.ordered_bonds[a1]]
                 atoms2 = [n for n,_ in mol.ordered_bonds[matches[a1]]]
@@ -745,6 +911,15 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
             for neighbor, is_same_component_boolean in sub_mol.component_bonds.get(a1,[]):
                 observed_same_component = (mol.atom2component[matches[a1]] == mol.atom2component[matches[neighbor]])
                 if observed_same_component != is_same_component_boolean:
+                    return []
+        #check cis-trans stereochemistry:
+        for (a1,a2),v in sub_mol.cis.items():
+            for o1,o2 in v:
+                if not (matches[o1],matches[o2]) in mol.cis.get((matches[a1],matches[a2]),[]):
+                    return []
+        for (a1,a2),v in sub_mol.trans.items():
+            for o1,o2 in v:
+                if not (matches[o1],matches[o2]) in mol.trans.get((matches[a1],matches[a2]),[]):
                     return []
         return [matches.copy()]
 
@@ -764,6 +939,51 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
         break #only process one atom from sub_mol.atoms, then break
     return out
 
+class Search(object):
+    @classmethod
+    def search(self, end, start=None):
+        q = Queue.PriorityQueue()
+        i = (self.score(end, start),end,[])
+        print "Starting: ",(i[0], str(i[1]), i[2])
+        done_list = set([]) #list of mols we have already checked
+        q.put(i)
+        while not q.empty():
+            val,m,path = q.get()
+            #check if we're already processed this reactant
+            if m in done_list:
+                continue
+            done_list.add(m)
+            print done_list
+            print "Searching... ", (val, str(m), path)
+            if self.score(m,start) < -0.99:
+                return val,str(m),list(reversed(path))
+                break #synthesis complete
+            for rxn in all_retros.values():
+                print "Trying {rxn}...".format(**vars())
+                out = rxn.run([m])
+                if out:
+                    for product_set in out:
+                        for new_mol in product_set:
+                            if new_mol:
+                                print "Reaction result: " + str([str(new_mol)])
+                                print self.score(new_mol,start)
+                                i = (self.score(new_mol,start),new_mol,path+[str(rxn)])
+                                q.put(i)
+    @classmethod
+    def score(self, end, start=None):
+        """complexity score of a compound
+        Should be high when that compound is difficult to synthesize
+        and low when it is easy to synthesize
+        """
+        sim = end.similarity(start)
+        if start:
+            return -1 * sim #lower scores are better
+
+        if Hydrobromination.has_br(end):
+            return 2
+        else:
+            return 1
+
 def test_chunks():
     s = "CCCC=O"
     s = '[CH3][CH2]C#[CH]'
@@ -777,8 +997,10 @@ def test_mol_to_smiles():
     s = 'CC(Br)CC'
     m = Molecule(s)
     s_out = mol_to_smiles(m)
-    m_out = Molecule(s_out)
-    assert(m_out == m)
+    #want to make sure smiles prints
+    # CC(Br)CC instead the equivalent but
+    # uglier CC(CC)Br
+    assert(s_out == s)
 
 def test_substructure():
     m1 = Molecule("CCC(Br)CI")
@@ -832,6 +1054,33 @@ def rxn_setup():
 
     # all_retros["esterification"] = Retro("esterification",["C(=O)O.OCC>>C(=O)OCC.O"]))
 
+    all_retros["kmno4"] = Retro("KMnO4", ['[C:1]([C:2])([C:3])=O.[C:4]([C:5])([C:6])=O>>[C:1]([C:2])([C:3])=[C:4]([C:5])([C:6])',
+                                          '[C:3][C:1](=O)[OH].[C:2](=O)(=O) >> [C:3][CH:1]=[CH2:2]'])
+
+    all_retros["diol_1_2_oxidative_cleavage"] = Retro("Diol 1 2 Oxidative Cleavage", ['[C:1]=O.[C:2]=O>>[C:1]([OH])[C:2]([OH])'])
+
+    all_retros["dehydrohalogenation_vicinal_dihalides"] = Retro("Dehydrohalogenation Vicinal Dihalides", ['[C:1][C:2]#[C:3][C:4] >> [C:1][C:2](Br)[C:3](Br)[C:4]'])
+
+    all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", ['[CH:1]#[C:2][C:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3][Br]',
+                                                 '[C:1][C:2]#[C:3][CH2:4][C:5] >> [C:1][C:2]#[CH:3].[C:5][CH2:4][Br]'])
+
+    all_retros["alkyne_plus_HX"] = Retro("Alkyne Plus HX", ['[C:1][C:2](Br)(Br)[CH3:3] >> [C:1][C:2](Br)=[CH2:3]', '[C:1][C:2](Br)=[CH2:3] >> [C:1][C:2]#[CH:3]'])
+
+    all_retros["alkyne_plus_X2"] = Retro("Alkyne Plus X2", ['[C:1][C:2](Br)(Br)[C:3](Br)(Br)[C:4] >> Br\[C:2]([C:1])=[C:3]([C:4])/Br', 'Br\[C:2]([C:1])=[C:3]([C:4])/Br >> [C:1][C:2]#[C:3][C:4]'])
+
+    all_retros["alkyne_mercuric_hydration"] = Retro("Alkyne Mercuric Hydration", ['[C:1][C:2](=O)[CH3:3] >> [C:1][C:2]#[CH:3]'])
+
+    all_retros["alkyne_hydroboration"] = Retro("Alkyne Hydroboration", ['[C:1][CH2:2][CH:3](=O) >> [C:1][C:2]#[CH:3]'])
+
+    all_retros["alkyne_hydrogenation_paladium"] = Retro("Alkyne Hydrogenation Paladium", ['[C:1][CH2:2][CH2:3][C:4] >> [C:1][C:2]#[C:3][C:4]'])
+
+    all_retros["alkyne_hydrogenation_lindlar"] = Retro("Alkyne Hydrogenation Lindlar", ['[C:1]\[CH:2]=[CH:3]/[C:4] >> [C:1][C:2]#[C:3][C:4]'])
+
+    all_retros["alkyne_hydrogenation_lithium"] = Retro("Alkyne Hydrogenation Lithium", ['[C:1]\[CH:2]=[CH:3]\[C:4] >> [C:1][C:2]#[C:3][C:4]'])
+
+    all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", ['[CH:1]#[C:2][CH2:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3]Br', '[C:1][C:2]#[C:3][CH2:4][C:5]  >> [C:1][C:2]#[CH:3].[C:5][CH2:4]Br'])
+
+    all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", ['[C:1][C:2](=O)[OH].[C:4][C:3](=O)[OH] >> [C:1][C:2]#[C:3][C:4]'])
     
 def test_retro():
     print "Creating reactant"
@@ -911,6 +1160,59 @@ def test_reactions():
     end1 = (Molecule("ClC=CBr"),)
     assert(all_retros["ozonolysis"].run(start1)[0] == end1)
 
+    start1 = [Molecule("C(C)(C)=O"),Molecule("C(C)(C)=O")]
+    end1 = (Molecule("CC(C)=C(C)C"),)
+    assert(all_retros["kmno4"].run(start1)[0] == end1)
+
+    start1 = [Molecule("C=O"),Molecule("C=O")]
+    end1 = (Molecule("C(O)C(O)"),)
+    assert(all_retros["diol_1_2_oxidative_cleavage"].run(start1)[0] == end1)
+
+    start1 = (Molecule("CC#CC"),)
+    end1 = (Molecule("CC(Br)C(Br)C"),)
+    assert(all_retros["dehydrohalogenation_vicinal_dihalides"].run(start1)[0] == end1)
+
+    start1 = (Molecule("CC#CCC"),)
+    end1 = (Molecule("CC#C"),Molecule("CCBr"))
+    out1 = all_retros["acetylide_ion_alkylation"].run(start1)[0]
+    assert(set(out1) == set(end1))
+
+    start1 = (Molecule("CC(Br)(Br)C"),)
+    end1 = (Molecule("CC(Br)=C"),)
+    assert(all_retros["alkyne_plus_HX"].run(start1)[0] == end1)
+
+    start1 = (Molecule("Br\C(C)=C(C)/Br"),)
+    end1 = (Molecule("CC#CC"),)
+    assert(all_retros["alkyne_plus_X2"].run(start1)[0] == end1)
+
+    start1 = (Molecule("CC(=O)C"),)
+    end1 = (Molecule("CC#C"),)
+    assert(all_retros["alkyne_mercuric_hydration"].run(start1)[0] == end1)
+
+    start1 = (Molecule("CCC=O"),)
+    end1 = (Molecule("CC#C"),)
+    assert(all_retros["alkyne_hydroboration"].run(start1)[0] == end1)
+
+    start1 = (Molecule("CCCC"),)
+    end1 = (Molecule("CC#CC"),)
+    assert(all_retros["alkyne_hydrogenation_paladium"].run(start1)[0] == end1)
+    
+    start1 = (Molecule("C\C=C/C"),)
+    end1 = (Molecule("CC#CC"),)
+    assert(all_retros["alkyne_hydrogenation_lindlar"].run(start1)[0] == end1)
+
+    start1 = (Molecule("C\C=C\C"),)
+    end1 = (Molecule("CC#CC"),)
+    assert(all_retros["alkyne_hydrogenation_lithium"].run(start1)[0] == end1)
+
+    start1 = (Molecule("C#CCC"),)
+    end1 = (Molecule("C#C"),Molecule("CCBr"))
+    out1 = all_retros["acetylide_ion_alkylation"].run(start1)[0]
+    assert(set(out1) == set(end1))
+
+    start1 = (Molecule("CC(=O)O"),Molecule("CC(=O)O"))
+    end1 = (Molecule("CC#CC"),)
+    assert(all_retros["alkyne_oxidative_cleavage"].run(start1)[0] == end1)
 
     
 def test_chirality():
@@ -976,19 +1278,54 @@ def test_merge_split():
     assert(Molecule.merge([m1,m2,m3]) == mout) #yikes this is slow
 
     mout = Molecule("C2CC2.CCCI.CC(Br)(Br)C")
-    for o in  mout.split():
-        print o
+    assert(set(mout.split()) == set([Molecule("C2CC2"),Molecule("CCCI"),Molecule("CC(Br)(Br)C")]))
+
+def test_cis_trans():
+    m1 = Molecule('I\C(\Cl)=C(\F)Br')
+    m2 = Molecule('I/C(/Cl)=C(/F)Br')
+    m3 = Molecule('I/C(/Cl)=C(\F)Br')
+    assert(m1 == m2)
+    assert(m1 != m3)
+
+def test_search():
+    #Alkene Hydroxylation
+    start = Molecule('C1CC=CC1')
+    end = Molecule('C1C([OH])C([OH])CC1')
+
+    #Hydroboration
+    start = Molecule('C1CC=CC1')
+    end = Molecule('C1CC([OH])CC1')
+
+    #Dichlorocarbene Addition -> Alkene Hydrogenation
+    start = Molecule('C1CC=CC1')
+    end = Molecule('C1CC2C(Cl)(Cl)C2C1')
+
+    score, m_out, path = Search.search(end, start)
+
+    start = Molecule('C1C([CH3])([OH])CCCC1')
+    end = Molecule('C1C([CH3])=CCCC1')
+
+    # start = Molecule('CC=CC(C)C')
+    # end = 
+
+    start = Molecule('CC(C)=C')
+    end = Molecule('CC(C)C[OH]')
+
+
+    ####alkyne test cases
+    start = Molecule('[CH3][CH2]C#[CH]')
+    end = Molecule('[CH3][CH2]C(=O)[CH3]')
+
+
+    start = Molecule('[CH3][CH2]C#[CH]')
+    end = Molecule('CCCC=O')
+
+
+    start = Molecule('CCCC#C')
+    end = Molecule('CCCC=O')
+
+    
     
 if __name__ == "__main__":
-    # print mol_to_smiles(m1)
-
-    # test_smiles_ring_bonds()
-    # print list(get_chunks("[C:1]1CCC1"))
-
-
-    # m= Molecule("C(=O)O.OCC") #>>C(=O)OCC.O")
-    # m.setup_dfs()
-    # print m.split()[1]
-
-    test_reactions()
-
+    # rxn_setup()
+    # test_search()
