@@ -371,14 +371,14 @@ class Structure(object):
         stack = collections.deque()
         while len(self.atom2component) < len(self.atoms):
             #find next atom to start dfs from
-            for a in self.atoms:
-                if a not in self.atom2component:
-                    if self.component2root:
-                        curr_component = max(self.component2root.keys()) + 1
-                    self.component2root[curr_component] = a
-                    self.atom2component[a] = curr_component
-                    stack.append((a,None,None))
-                    break
+            #start with one of the atoms with the lowest degree to make prettier smiles represenation
+            unused_atoms = sorted([a for a in self.atoms if a not in self.atom2component],key=lambda x: len(self.bonds[x])) 
+            next_atom = unused_atoms[0]
+            if self.component2root:
+                curr_component = max(self.component2root.keys()) + 1
+            self.component2root[curr_component] = next_atom
+            self.atom2component[next_atom] = curr_component
+            stack.append((next_atom,None,None))
             #run dfs from that node
             while stack:
                 curr_atom, parent, bond_type = stack.pop()
@@ -1032,7 +1032,7 @@ def rxn_setup():
 
     # dehydrohalogenation = Retro("Dehydrohalogenation", ['[C:1]=[C:2] >> [C:1][C:2][F,Cl,Br,I]'])
 
-    all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
+    # all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
 
     all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", ['[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]'])
     
@@ -1046,7 +1046,7 @@ def rxn_setup():
 
     all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", ['[C:1]([OH])[C:2]([OH])>>[C:1]=[C:2]'])
 
-    all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", ['[C:1]C(Cl)(Cl)[C:2]>>[C:1]=[C:2]'])
+    all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", ['[C:1]1C(Cl)(Cl)[C:2]1>>[C:1]=[C:2]'])
 
     all_retros["simmons_smith"] = Retro("Simmons-Smith", ['[C:1]1[CH2][C:2]1>>[C:1]=[C:2]'])
 
@@ -1114,14 +1114,15 @@ def test_reactions():
     # start1 = Molecule("CCBr")
 
     #alcohol_dehydration
-    start1 = Molecule("C=CCCC")
+    start1 = (Molecule("C=CCCC"),)
     #TODO:
     #smarter SMILES printing: eg
     #C(CC(C)O)C
     #would look better as
     #CCCC(O)C
-    end = [Molecule("CCCCCO"),Molecule("CCCC(O)C")]
-    assert(all([output in end for output in all_retros["alcohol_dehydration"].run([start1])[0]]))
+    end = ((Molecule("CCCCCO"),),(Molecule("CCCC(O)C"),))
+    out = all_retros["alcohol_dehydration"].run(start1)
+    assert(set(end) == set(out))
 
     #[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]
     start1 = (Molecule("C[C@@](F)(Cl)[C@](F)(C)C"),)
@@ -1149,9 +1150,13 @@ def test_reactions():
     assert(all_retros["alkene_hydroxylation"].run(start1)[0] == end1)
 
     start1 = (Molecule("CC(Cl)(Cl)C"),)
-    end1 = (Molecule("C=C"),)
+    end1 = (Molecule("CC(Cl)(Cl)C"),)
     assert(all_retros["dichlorocarbene_addition"].run(start1)[0] == end1)
 
+    start1 = (Molecule("C1C(Cl)(Cl)C1"),)
+    end1 = (Molecule("C=C"),)
+    assert(all_retros["dichlorocarbene_addition"].run(start1)[0] == end1)
+    
     start1 = (Molecule("CCC1CC1"),)
     end1 = (Molecule("CCC=C"),)
     assert(all_retros["simmons_smith"].run(start1)[0] == end1)
@@ -1300,8 +1305,7 @@ def test_search():
     start = Molecule('C1CC=CC1')
     end = Molecule('C1CC2C(Cl)(Cl)C2C1')
 
-    score, m_out, path = Search.search(end, start)
-
+    #TODO: fix this example!!
     start = Molecule('C1C([CH3])([OH])CCCC1')
     end = Molecule('C1C([CH3])=CCCC1')
 
@@ -1311,21 +1315,31 @@ def test_search():
     start = Molecule('CC(C)=C')
     end = Molecule('CC(C)C[OH]')
 
-
     ####alkyne test cases
+
+    #alkyne mercuric hydration
     start = Molecule('[CH3][CH2]C#[CH]')
     end = Molecule('[CH3][CH2]C(=O)[CH3]')
 
-
+    #alkyne hydroboration
     start = Molecule('[CH3][CH2]C#[CH]')
     end = Molecule('CCCC=O')
 
-
+    #TODO: fix this example!!
     start = Molecule('CCCC#C')
     end = Molecule('CCCC=O')
 
+    score, m_out, path = Search.search(end, start)
     
     
 if __name__ == "__main__":
-    # rxn_setup()
-    # test_search()
+    rxn_setup()
+    test_search()
+
+    # start1 = (Molecule("CC(O)C(Br)(I)"),)
+    # end1 = (Molecule("C(C)=C(Br)I"),)
+
+    # start1 = (Molecule('C1C([CH3])([OH])CCCC1'),)
+    # # end = Molecule('C1C([CH3])=CCCC1')
+    # #C1C(C)=CCCC1
+    # print(all_retros["oxymercuration"].run(start1)[0][0])
