@@ -91,7 +91,6 @@ class Structure(object):
             if label: #C:1
                 self.label2atom[label] = next_atom
                 self.atom2label[next_atom] = label
-
             if bond_string in Bond.valid_bond_strings: #includes bond_string = ""
                 b = Bond(bond_string)
                 if atom:
@@ -108,7 +107,7 @@ class Structure(object):
             if ring_bond_label:
                 self.ring_bond_labels.setdefault(ring_bond_label,[]).append((next_atom, b))
                 if len(self.ring_bond_labels[ring_bond_label]) > 2:
-                    raise Exception("ERROR: three or more copies of the same ring bond")
+                    raise Exception("ERROR: three or more copies of the same ring bond label")
                 elif len(self.ring_bond_labels[ring_bond_label]) == 2:
                     a1,b1 = self.ring_bond_labels[ring_bond_label][0]
                     a2,b2 = self.ring_bond_labels[ring_bond_label][1]
@@ -658,7 +657,7 @@ class Atom(AtomType):
         return elt2cnt[self.name]
     def cur_bond_cnt(self):
         return sum(b.bond_cnt for b in self.struct.bonds.get(self,{}).values())
-    def get_hydrogen_cnt(self):
+    def hydrogen_cnt(self):
         return self.max_bond_cnt() - self.cur_bond_cnt()
     def matches_atom(self, atom):
         return self.name == atom.name
@@ -667,7 +666,7 @@ class AtomPattern(AtomType):
     """Contains partial information about an atom 
     for example "!C" (not carbon), or "*" (any atom), "OH" (oxygen attached to >=1 hydrogen)
     """
-    def parse_hydrogen_cnt(self):
+    def hydrogen_cnt(self):
         """Atom patterns may contain a number of hydrogens, for example
         CH3 or OH
         """
@@ -682,8 +681,8 @@ class AtomPattern(AtomType):
     def matches_atom(self, atom):
         if not isinstance(atom, Atom):
             raise
-        pattern_hydrogen_cnt = self.parse_hydrogen_cnt()
-        atom_hydrogen_cnt = atom.get_hydrogen_cnt()
+        pattern_hydrogen_cnt = self.hydrogen_cnt()
+        atom_hydrogen_cnt = atom.hydrogen_cnt()
         if pattern_hydrogen_cnt  and not pattern_hydrogen_cnt == atom_hydrogen_cnt:
             return False
         if self.name == "*":
@@ -904,6 +903,14 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
             if a1 in sub_mol.chirality and matches[a1] in mol.chirality:
                 atoms1 = [matches[n] for n,_ in sub_mol.ordered_bonds[a1]]
                 atoms2 = [n for n,_ in mol.ordered_bonds[matches[a1]]]
+                #treat implicit hydrogens as the second bonded atom of 4:
+                #http://opensmiles.org/spec/open-smiles-3-input.html
+                if len(atoms1) < 4 and len(atoms1) < 4:
+                    h_atom = Atom("H", None)
+                    if len(atoms1) == 3 and a1.hydrogen_cnt() == 1:
+                        atoms1 = atoms1[:1] + [h_atom] + atoms1[1:]
+                    if len(atoms2) == 3 and matches[a1].hydrogen_cnt() == 1:
+                        atoms2 = atoms2[:1] + [h_atom] + atoms2[1:]
                 order_match = compare_stereochemistry(atoms1,atoms2)
                 chirality_match = 1 * (sub_mol.chirality[a1] == mol.chirality[matches[a1]])
                 if order_match != chirality_match:
@@ -1026,11 +1033,12 @@ def test_all():
 all_retros = {}
     
 def rxn_setup():
-    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
-
+    #mcmurray 6.8-6.9
     all_retros["hydrobromination"] = Retro("Hydrobromination", ['[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]','[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
-    # dehydrohalogenation = Retro("Dehydrohalogenation", ['[C:1]=[C:2] >> [C:1][C:2][F,Cl,Br,I]'])
+    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+
+    # all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", [])
 
     # all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
 
@@ -1331,15 +1339,23 @@ def test_search():
 
     score, m_out, path = Search.search(end, start)
     
+
+def test_implicit_hydrogen_stereochemistry():
+    #implicit H is treated as the second neighbor of the carbon
+    m = Molecule("Br[C@](Cl)I")
+    m2 = Molecule("Br[C@@](Cl)I")
+    assert(m != m2)
+
+    m2 = Molecule("Br[C@@](I)Cl")
+    assert(m == m2)
     
 if __name__ == "__main__":
-    rxn_setup()
-    test_search()
+    # rxn_setup()
+    # test_search()
 
-    # start1 = (Molecule("CC(O)C(Br)(I)"),)
-    # end1 = (Molecule("C(C)=C(Br)I"),)
+    # m = Molecule("[C@](Br)(I)C")
+    # m2 = Molecule("[C@@](Br)(I)C")
+    # print m == m2
+    # # print m2
 
-    # start1 = (Molecule('C1C([CH3])([OH])CCCC1'),)
-    # # end = Molecule('C1C([CH3])=CCCC1')
-    # #C1C(C)=CCCC1
-    # print(all_retros["oxymercuration"].run(start1)[0][0])
+    test_implicit_hydrogen_stereochemistry()
