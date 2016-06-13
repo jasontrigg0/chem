@@ -327,6 +327,11 @@ class Structure(object):
         else:
             return
         self.component_bonds.setdefault(atom1,[]).append((atom2, is_same_component_boolean))
+    def is_chiral_atom(self, atom):
+        #atom.hydrogen_cnt
+        bond_cnt = len(self.ordered_bonds.get(atom,[]))
+        hydrogen = atom.hydrogen_cnt()
+        return (bond_cnt + hydrogen) == 4
     def bond_summary(self, atom):
         out = []
         for a2, bond_type in self.ordered_bonds.get(atom,[]):
@@ -357,7 +362,9 @@ class Structure(object):
         self.bonds[atom2].pop(atom1)
         self.ordered_bonds[atom1].remove((atom2, bond_type))
         self.ordered_bonds[atom2].remove((atom1, bond_type))
-
+        if bond_type == Bond("=") and str(atom1) == "C" and str(atom2) == "C":
+            self.c_double_bonds.remove(set([atom1,atom2]))
+            
     def setup_dfs(self):
         self.children = {}
         self.parent = {}
@@ -371,7 +378,7 @@ class Structure(object):
         while len(self.atom2component) < len(self.atoms):
             #find next atom to start dfs from
             #start with one of the atoms with the lowest degree to make prettier smiles represenation
-            unused_atoms = sorted([a for a in self.atoms if a not in self.atom2component],key=lambda x: len(self.bonds[x])) 
+            unused_atoms = sorted([a for a in self.atoms if a not in self.atom2component],key=lambda x: len(self.bonds.get(x,{}))) 
             next_atom = unused_atoms[0]
             if self.component2root:
                 curr_component = max(self.component2root.keys()) + 1
@@ -567,14 +574,16 @@ class Reaction(object):
                         #create new atom and add to mapping
                         new_atom = add_atom_copy(neighbor, mol_to_transform)
                         products_map[neighbor] = new_atom
+                    #because for loop goes through
+                    #all molecule atoms along with all neighbors
+                    #only add up_bonds to avoid overcounting
+                    if neighbor in self.product_template.up_bonds.get(a2,[]):
+                        mol_to_transform.add_up_bond(products_map[a2], products_map[neighbor])
                     mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
             #update mol_to_transform.chirality:
-            #atoms with < 4 bonds no longer have chirality
             for a in mol_to_transform.atoms:
-                if a in mol_to_transform.chirality and len(mol_to_transform.ordered_bonds.get(a,[])) < 4:
+                if a in mol_to_transform.chirality and not mol_to_transform.is_chiral_atom(a):
                     mol_to_transform.chirality.pop(a)
-
-
             product_set = tuple(mol_to_transform.split(),)
             out.append(product_set)
         return out
@@ -815,12 +824,17 @@ def smiles_helper(mol, atom):
             out += str(mol.bonds[atom][parent])
     #check how the dfs ordering compares with the stereochemistry:
     stereo_str = ""
-    if len(mol.bonds.get(atom,[])) == 4 and atom in mol.chirality:
+    if atom in mol.chirality:
         mol_neighbors = [n for n,_ in mol.ordered_bonds[atom]]
         smiles_neighbors = []
         if mol.parent.get(atom,None):
             smiles_neighbors += [mol.parent[atom]]
         smiles_neighbors += children
+        if len(mol_neighbors) < 4 and len(smiles_neighbors) < 4:
+            #implicit hydrogen is always in the second position
+            h_atom = Atom("H", None)
+            mol_neighbors = mol_neighbors[:1] + [h_atom] + mol_neighbors[1:]
+            smiles_neighbors = smiles_neighbors[:1] + [h_atom] + smiles_neighbors[1:]
         if compare_stereochemistry(mol_neighbors, smiles_neighbors):
             stereo_str = mol.chirality[atom]
         else:
@@ -883,6 +897,9 @@ def find_substructure(substruct, mol):
 
     possibilities = {}
     for a1 in substruct.atoms:
+        #if a1 is * type, include the possibility of matching to nothing (ie serving as implicit H)
+        if str(a1) == "*":
+            possibilities.setdefault(a1,[]).append(None)
         for a2 in mol.atoms:
             if a1.matches_atom(a2) and is_bond_subset(a1, a2):
                 possibilities.setdefault(a1,[]).append(a2)
@@ -896,6 +913,8 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
     if len(matches) == len(sub_mol.atoms):
         for a1 in sub_mol.atoms:
             b1 = matches[a1]
+            if b1 == None:
+                continue
             for neighbor, bond_type in sub_mol.ordered_bonds.get(a1,[]):
                 if not (matches[neighbor], bond_type) in mol.ordered_bonds[b1]:
                     return [] #no match!
@@ -1036,15 +1055,20 @@ def rxn_setup():
     #mcmurray 6.8-6.9
     all_retros["hydrobromination"] = Retro("Hydrobromination", ['[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]','[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
-    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+    #mcmurray 7.1
+    all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", ['[*:1]/[C:2](/[*:3])=[C:4](\[*:5])(/[*:6]) >> [*:1][C@@H:2]([*:3])[C@@:4]([*:5])([*:6])Br'])
 
-    # all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", [])
+    #mcmurray 7.1
+    all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
 
-    # all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
-
-    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", ['[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]'])
+    #mcmurray 7.2
+    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", ['[*:2][C@@:1]([*:3])(F)[C@:4](F)([*:6])[*:5] >> [*:2]\[C:1](\[*:3])=[C:4](\[*:5])/[*:6]'])
     
+    #mcmurray 7.3
     all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+
+    #mcmurray 7.3
+    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C@@:2]([C:3])(Br)[C@:4]([*:6])([*:7])[OH]>>[C:1]\[C:2](\[C:3])=[C:4](/[*:6])(\[*:7])', '[C:1][C@@:2]([*:3])(Br)[C@:4]([!C:5])([!C:6])[OH]>>[C:1]\[C:2](\[*:3])=[C:4](/[*:5])(\[*:6])'])
 
     all_retros["oxymercuration"] = Retro("Oxymercuration", ['[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
@@ -1119,7 +1143,9 @@ def test_reactions():
     assert(all_retros["hydrobromination"].run([start1])[0] == (Molecule("CC(C)=C"),))
 
     #dehydrohalogenation
-    # start1 = Molecule("CCBr")
+    start1 = (Molecule("I\C(\Cl)=C(\I)/Cl"),)
+    end1 = (Molecule("I[C@@](Cl)[C@@](Cl)(I)Br"),)
+    assert(all_retros["dehydrohalogenation"].run(start1)[0] == end1)
 
     #alcohol_dehydration
     start1 = (Molecule("C=CCCC"),)
@@ -1133,11 +1159,12 @@ def test_reactions():
     assert(set(end) == set(out))
 
     #[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]
-    start1 = (Molecule("C[C@@](F)(Cl)[C@](F)(C)C"),)
-    end1 = (Molecule("ClC(C)=C(C)C"),)
+    start1 = (Molecule("C[C@@](Cl)(F)[C@](C)(Cl)F"),)
+    end1 = (Molecule("Cl/C(/C)=C(/C)\Cl"),)
     assert(all_retros["alkene_plus_x2"].run(start1)[0] == end1)
 
     start1 = (Molecule("CC(C)(Br)CO"),)
+    print all_retros["halohydrin_formation"].run(start1)[0][0]
     end1 = (Molecule("CC(C)=C"),)
     assert(all_retros["halohydrin_formation"].run(start1)[0] == end1)
 
@@ -1350,12 +1377,9 @@ def test_implicit_hydrogen_stereochemistry():
     assert(m == m2)
     
 if __name__ == "__main__":
-    # rxn_setup()
+    rxn_setup()
     # test_search()
 
-    # m = Molecule("[C@](Br)(I)C")
-    # m2 = Molecule("[C@@](Br)(I)C")
-    # print m == m2
-    # # print m2
-
-    test_implicit_hydrogen_stereochemistry()
+    # test_reactions()
+    
+    print find_substructure(Substructure("[*:1]C"),Molecule("C"))
