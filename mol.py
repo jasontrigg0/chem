@@ -24,15 +24,19 @@ class Structure(object):
     def __init__(self):
         self.setup()
     def setup(self):
-        self.atoms = []
+        self.explicit_atoms = []
+        self.implicit_atoms = []
+        
         self.atom2label = {} #for labels like [C:4]
         self.label2atom = {}
 
         #maintain two lists of bonds -- self.bonds for quick access
         #and self.ordered_bonds to store stereochemical information
         self.bonds = {} #atom1 -> atom2 -> bond_type (bonds are symmetric)
-        self.ordered_bonds = {} #atom1 -> [(atom2,bond_type)]
+        self.implicit_bonds = {} #implicit hydrogen bonds atom1 -> atom2 -> bond_type
 
+        self.ordered_bonds = {} #atom1 -> [(atom2,bond_type)]
+        
         #component_bonds maintains a list of componant constraints
         #in the case of templates
         #ie atom1, atom2 must be in the same component (1)
@@ -115,8 +119,18 @@ class Structure(object):
                         raise Exception("ERROR: ring bonds with same label ({ring_bond_label}) have different bonds".format(**vars()))
                     
                     self.add_bond(a1,a2,b1)
-            self.atoms.append(next_atom)
+            self.add_atom(next_atom)
             atom = self.last_atom()
+    def add_implicit_hydrogens(self):
+        for a in self.explicit_atoms:
+            if a.implicit_hydrogen_cnt():
+                for i in range(a.implicit_hydrogen_cnt()):
+                    h_atom = Atom("H",self)
+                    self.add_atom(h_atom)
+                    self.implicit_bonds.setdefault(h_atom,{})[a] = Bond("")
+                    self.implicit_bonds.setdefault(a,{})[h_atom] = Bond("")
+                    #TODO check that we're doing everything in self.add_bond
+                    # self.add_bond(a,h_atom,Bond(""))
     @classmethod
     def merge(cls, list_of_structures):
         """
@@ -125,7 +139,8 @@ class Structure(object):
         """
         out = object.__new__(cls)
         out.setup()
-        out.atoms = [a for s in list_of_structures for a in s.atoms]
+        out.explicit_atoms = [a for s in list_of_structures for a in s.explicit_atoms]
+        out.implicit_atoms = [a for s in list_of_structures for a in s.implicit_atoms]
         for s in list_of_structures:
             out.chirality.update(s.chirality)
             if s.atom2label:
@@ -134,6 +149,7 @@ class Structure(object):
                 raise
             out.bonds.update(s.bonds)
             out.ordered_bonds.update(s.ordered_bonds)
+            out.implicit_bonds.update(s.implicit_bonds)
 
             out.c_double_bonds += s.c_double_bonds
             out.c_double_bond_atoms.update(s.c_double_bond_atoms)
@@ -155,8 +171,8 @@ class Structure(object):
         for component in self.component2root:
             obj = object.__new__(self.__class__)
             obj.setup()
-            obj.atoms = [a for a in self.atoms if self.atom2component[a] == component]
-            component_atoms = set(obj.atoms)
+            obj.explicit_atoms = [a for a in self.explicit_atoms if self.atom2component[a] == component]
+            component_atoms = set(obj.explicit_atoms)
             obj.atom2label = dict((a,l) for a,l in self.atom2label.items() if a in component_atoms)
             obj.label2atom = dict((l,a) for l,a in self.label2atom.items() if a in component_atoms)
             obj.chirality = dict((a,c) for a,c in self.chirality.items() if a in component_atoms)
@@ -170,12 +186,15 @@ class Structure(object):
 
             obj.up_bonds = dict((a,v) for a,v in self.up_bonds.items() if a in component_atoms)
             obj.down_bonds = dict((a,v) for a,v in self.down_bonds.items() if a in component_atoms)
-            
+
+            for a in obj.explicit_atoms:
+                a.struct = obj
+                
             obj.setup_dfs()
+            if isinstance(obj, Molecule):
+                obj.add_implicit_hydrogens()
             out.append(obj)
         return out
-
-    
     def copy(self):
         #return
         #copied_object, along with a map from old atoms to new atoms
@@ -187,11 +206,12 @@ class Structure(object):
 
         #create a mapping from atoms in the current obj to atoms in the copied object
         atom_map = {}
-        for a in self.atoms:
+        for a in self.explicit_atoms + self.implicit_atoms:
             a_new = Atom(a.name, out)
             atom_map[a] = a_new
-
-        out.atoms = atom_map.values()
+            
+        out.explicit_atoms = [atom_map[a] for a in self.explicit_atoms]
+        out.implicit_atoms = [atom_map[a] for a in self.implicit_atoms]
             
         out.atom2label = dict((atom_map[a],l) for a,l in self.atom2label.items())
         out.label2atom = dict((l,atom_map[a]) for l,a in self.label2atom.items())
@@ -228,10 +248,15 @@ class Structure(object):
         return out, atom_map
     
     def last_atom(self):
-        if self.atoms:
-            return self.atoms[-1]
+        if self.explicit_atoms:
+            return self.explicit_atoms[-1]
         else:
             return None
+    def add_atom(self, atom):
+        if atom.elt == "H":
+            self.implicit_atoms.append(atom)
+        else:
+            self.explicit_atoms.append(atom)
     def add_bond(self, atom1, atom2, bond_type):
         if self.bonds.get(atom1,{}).get(atom2,None):
             return
@@ -332,16 +357,19 @@ class Structure(object):
         bond_cnt = len(self.ordered_bonds.get(atom,[]))
         hydrogen = atom.hydrogen_cnt()
         return (bond_cnt + hydrogen) == 4
-    def bond_summary(self, atom):
+    def get_bonds(self, atom):
         out = []
-        for a2, bond_type in self.ordered_bonds.get(atom,[]):
+        for a2, bond_type in self.bonds.get(atom,{}).items() + self.implicit_bonds.get(atom,{}).items():
             out.append((a2, bond_type))
         return out
-    def hydrogen_cnt(self, atom):
-        pass
+    # def bond_summary(self, atom):
+    #     out = []
+    #     for a2, bond_type in self.ordered_bonds.get(atom,[]):
+    #         out.append((a2, bond_type))
+    # return out
     def all_bonds(self, raw=False):
         out = []
-        for a1 in self.atoms:
+        for a1 in self.explicit_atoms:
             for a2, bond_type in self.ordered_bonds.get(a1,[]):
                 if raw:
                     out.append((a1, a2, bond_type))
@@ -349,7 +377,7 @@ class Structure(object):
                     out.append((str(a1), str(a2), str(bond_type)))
         return out
     def remove_atom(self, atom1):
-        self.atoms.remove(atom1)
+        self.explicit_atoms.remove(atom1)
         self.bonds.pop(atom1)
         self.ordered_bonds.pop(atom1)
         if atom1 in self.chirality:
@@ -375,10 +403,10 @@ class Structure(object):
         curr_ring_label = 1
         done = set()
         stack = collections.deque()
-        while len(self.atom2component) < len(self.atoms):
+        while len(self.atom2component) < len(self.explicit_atoms):
             #find next atom to start dfs from
             #start with one of the atoms with the lowest degree to make prettier smiles represenation
-            unused_atoms = sorted([a for a in self.atoms if a not in self.atom2component],key=lambda x: len(self.bonds.get(x,{}))) 
+            unused_atoms = sorted([a for a in self.explicit_atoms if a not in self.atom2component],key=lambda x: len([a for a in self.bonds.get(x,{}) if a.elt != "H"])) 
             next_atom = unused_atoms[0]
             if self.component2root:
                 curr_component = max(self.component2root.keys()) + 1
@@ -423,7 +451,7 @@ class Structure(object):
         return str(out)
     def bond_summary_str(self):
         out = ""
-        for a1 in self.atoms:
+        for a1 in self.explicit_atoms:
             out += str([(str(x),str(y)) for x,y in self.bond_summary(a1)]) + "\n"
         return out
     
@@ -435,10 +463,11 @@ class Molecule(Structure):
         super(Molecule,self).__init__()
         #parse the smiles clause and add atom-by-atom
         self.append_smiles_clause(smiles, template=False)
+        self.add_implicit_hydrogens()
     def __eq__(self, other):
         if not type(self) == type(other):
             return False
-        return (len(self.atoms) == len(other.atoms)) and (find_substructure(self, other) != [])
+        return (len(self.explicit_atoms) == len(other.explicit_atoms)) and (find_substructure(self, other) != [])
     def __ne__(self, other):
         return not self == other
     def __hash__(self):
@@ -532,23 +561,22 @@ class Reaction(object):
         out = []
         for m_basic in mappings:
             mol_to_transform, copy_map = reactants_mol.copy_with_map()
-
             #m_basic is a map from self.reactant_template -> reactants_mol
             #create m a map from self.reactant_template -> mol_to_transform
             m = dict((k,copy_map[v]) for k,v in m_basic.items())
-            
             #remove all the reactant atom bonds:
-            for a1 in self.reactant_template.atoms:
+            for a1 in self.reactant_template.explicit_atoms:
                 for neighbor, bond_type in self.reactant_template.ordered_bonds[a1]:
                     mol_to_transform.remove_bond(m[a1], m[neighbor], bond_type)
                 if not a1 in self.reactant_template.atom2label:
                     mol_to_transform.remove_atom(m[a1])
-
-
+            #remove all implicit atoms+bonds:
+            mol_to_transform.implicit_atoms = []
+            mol_to_transform.implicit_bonds = {}
             def add_atom_copy(old_atom, new_mol):
                 old_mol = old_atom.struct
                 new_atom = Atom(str(old_atom), new_mol)
-                new_mol.atoms.append(new_atom)
+                new_mol.add_atom(new_atom)
                 if old_atom in old_mol.chirality:
                     new_mol.chirality[new_atom] = old_mol.chirality[old_atom]
                 return new_atom
@@ -557,7 +585,7 @@ class Reaction(object):
             #the labels to map from product_template to reactant_template + 
             #the existing mapping from reactant_template to reactants_mol
             products_map = {}
-            for a2 in self.product_template.atoms:
+            for a2 in self.product_template.explicit_atoms:
                 if a2 in self.product_template.atom2label:
                     label = self.product_template.atom2label[a2]
                     reactant = self.reactant_template.label2atom[label]
@@ -567,7 +595,7 @@ class Reaction(object):
                     products_map[a2] = new_atom
 
             #add all the reaction product bonds:
-            for a2 in self.product_template.atoms:
+            for a2 in self.product_template.explicit_atoms:
                 for neighbor, bond_type in self.product_template.ordered_bonds.get(a2,[]):
                     if not neighbor in products_map:
                         # print "missing from mapping!"
@@ -581,9 +609,11 @@ class Reaction(object):
                         mol_to_transform.add_up_bond(products_map[a2], products_map[neighbor])
                     mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
             #update mol_to_transform.chirality:
-            for a in mol_to_transform.atoms:
+            for a in mol_to_transform.explicit_atoms:
                 if a in mol_to_transform.chirality and not mol_to_transform.is_chiral_atom(a):
                     mol_to_transform.chirality.pop(a)
+            #add back implicit atoms + bonds
+            mol_to_transform.add_implicit_hydrogens()
             product_set = tuple(mol_to_transform.split(),)
             out.append(product_set)
         return out
@@ -639,10 +669,10 @@ class AtomType(object):
         self.name = name.replace("@","")
         self.struct = struct
     def bond_summary(self):
-        return self.struct.bond_summary(self)
+        return self.struct.get_bonds(self)
     @property
     def elt(self):
-        for e in ["Cl","C","O","Br","I","F"]:
+        for e in ["Cl","C","O","Br","I","F","H"]:
             if self.name.replace("!","").startswith(e): #TODO: why replace "!" with "" ?????
                 return e
         return None
@@ -653,7 +683,7 @@ class Atom(AtomType):
     """Name, Bonds/Neighbors, Orientation/Stereochemistry, Labels"""
     def __init__(self, name, struct):
         super(Atom,self).__init__(name, struct)
-        self.name = re.sub(r"H\d*","",self.name) #OH -> O
+        self.name = re.sub(r"(.+)H\d*",r"\1",self.name) #OH -> O
     def max_bond_cnt(self):
         elt2cnt = {"H":1,
                    "C":4,
@@ -664,9 +694,15 @@ class Atom(AtomType):
                    "F":1,
         }
         return elt2cnt[self.name]
+    def bonds(self):
+        return self.struct.bonds.get(self,{})
     def cur_bond_cnt(self):
-        return sum(b.bond_cnt for b in self.struct.bonds.get(self,{}).values())
+        return sum(b.bond_cnt for b in self.bonds().values())
+    def hydrogen_bond_cnt(self):
+        return len([a for a in self.bonds().keys() if a.elt == "H"])
     def hydrogen_cnt(self):
+        return self.max_bond_cnt() - self.cur_bond_cnt() + self.hydrogen_bond_cnt()
+    def implicit_hydrogen_cnt(self):
         return self.max_bond_cnt() - self.cur_bond_cnt()
     def matches_atom(self, atom):
         return self.name == atom.name
@@ -690,12 +726,12 @@ class AtomPattern(AtomType):
     def matches_atom(self, atom):
         if not isinstance(atom, Atom):
             raise
+        if self.name == "*":
+            return True
         pattern_hydrogen_cnt = self.hydrogen_cnt()
         atom_hydrogen_cnt = atom.hydrogen_cnt()
         if pattern_hydrogen_cnt  and not pattern_hydrogen_cnt == atom_hydrogen_cnt:
             return False
-        if self.name == "*":
-            return True
         elif self.elt == atom.elt:
             return True
         elif self.name.startswith("!") and not atom.name == self.name[1:]:
@@ -770,7 +806,7 @@ def add_atom(mol, next_atom):
 
 def mol_to_smiles(mol):
     mol.setup_dfs()
-    if not mol.atoms:
+    if not mol.explicit_atoms:
         return ""
     component_smiles = [smiles_helper(mol, r) for _,r in mol.component2root.items()]
     return ".".join(component_smiles)
@@ -811,7 +847,7 @@ def opposite_chirality(c):
     
 def smiles_helper(mol, atom):
     """Compute smiles of a subsection of the molecule rooted at 'atom'"""
-    children = mol.children.get(atom,[])
+    children = [a for a in mol.children.get(atom,[]) if a.elt != "H"]
     children = sorted(children,key=lambda x: len(mol.bonds.get(x,{})))
     parent = mol.parent.get(atom,None)
     out = ""
@@ -840,12 +876,13 @@ def smiles_helper(mol, atom):
         else:
             stereo_str = opposite_chirality(mol.chirality[atom])
     atom_str = str(atom)
-    if stereo_str or (atom_str != atom.elt):
-        out += "["+atom_str+stereo_str+"]"
-    else:
-        out += atom_str
-    for bond_type, label in mol.ring_bonds.get(atom,[]):
-        out += str(bond_type) + str(label)
+    if atom_str != "H":
+        if stereo_str or (atom_str != atom.elt):
+            out += "["+atom_str+stereo_str+"]"
+        else:
+            out += atom_str
+        for bond_type, label in mol.ring_bonds.get(atom,[]):
+            out += str(bond_type) + str(label)
     if len(children) > 1:
         for c in children[:-1]:
             out += "(" + smiles_helper(mol,c) + ")"
@@ -892,31 +929,31 @@ def find_substructure(substruct, mol):
                 if not a1.matches_atom(a2) or not bond_type1 == bond_type2:
                     match = False
             if match:
+                # print "true"
                 return True
+        # print "false"
         return False
 
     possibilities = {}
-    for a1 in substruct.atoms:
-        #if a1 is * type, include the possibility of matching to nothing (ie serving as implicit H)
-        if str(a1) == "*":
-            possibilities.setdefault(a1,[]).append(None)
-        for a2 in mol.atoms:
+    for a1 in substruct.explicit_atoms:
+        for a2 in mol.explicit_atoms + mol.implicit_atoms: #allow matching to hydrogens if necessary
             if a1.matches_atom(a2) and is_bond_subset(a1, a2):
                 possibilities.setdefault(a1,[]).append(a2)
-
     return match_substructure_helper(substruct, mol, possibilities, {}, {})
 
 def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
     """matches = [(atom from sub_mol, mapped atom from mol)]"""
     #base case
     #all done matching -- check that it works!
-    if len(matches) == len(sub_mol.atoms):
-        for a1 in sub_mol.atoms:
+    if len(matches) == len(sub_mol.explicit_atoms):
+        for a1 in sub_mol.explicit_atoms:
             b1 = matches[a1]
             if b1 == None:
                 continue
             for neighbor, bond_type in sub_mol.ordered_bonds.get(a1,[]):
-                if not (matches[neighbor], bond_type) in mol.ordered_bonds[b1]:
+                if neighbor.elt == "H": continue #only worry about backbone bonds
+                if matches[neighbor] is None: continue
+                if not (matches[neighbor], bond_type) in mol.get_bonds(b1):
                     return [] #no match!
             #check chirality if necessary:
             if a1 in sub_mol.chirality and matches[a1] in mol.chirality:
@@ -951,18 +988,18 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
 
     #recursion
     out = []
-    for a1 in sub_mol.atoms:
+    for a1 in sub_mol.explicit_atoms:
         if a1 in matches:
             continue
         if a1 not in possibilities:
             return []
         for m in possibilities[a1]:
-            if m in matches.values(): #don't map two atoms from sub_mol to the same atom in mol
+            if m is not None and m in matches.values(): #don't map two atoms from sub_mol to the same atom in mol
                 continue
             matches[a1] = m
             out += match_substructure_helper(sub_mol, mol, possibilities, matches, done)
             matches.pop(a1)
-        break #only process one atom from sub_mol.atoms, then break
+        break #only process one atom from sub_mol.explicit_atoms, then break
     return out
 
 class Search(object):
@@ -1023,6 +1060,7 @@ def test_mol_to_smiles():
     s = 'CC(Br)CC'
     m = Molecule(s)
     s_out = mol_to_smiles(m)
+    print s, s_out
     #want to make sure smiles prints
     # CC(Br)CC instead the equivalent but
     # uglier CC(CC)Br
@@ -1140,6 +1178,8 @@ def test_reactions():
     
     #hydrobromination
     start1 = Molecule("CC(C)(Br)C")
+    # print all_retros["hydrobromination"].run([start1])[0][0] == Molecule("CC(C)=C")
+    # raise
     assert(all_retros["hydrobromination"].run([start1])[0] == (Molecule("CC(C)=C"),))
 
     #dehydrohalogenation
@@ -1164,8 +1204,8 @@ def test_reactions():
     assert(all_retros["alkene_plus_x2"].run(start1)[0] == end1)
 
     start1 = (Molecule("CC(C)(Br)CO"),)
-    print all_retros["halohydrin_formation"].run(start1)[0][0]
     end1 = (Molecule("CC(C)=C"),)
+    #TODO: current output is 'C\C(\C)=C' -- would be better if it showed CC(C)=C
     assert(all_retros["halohydrin_formation"].run(start1)[0] == end1)
 
     start1 = (Molecule("CC(O)C(Br)(I)"),)
@@ -1340,6 +1380,8 @@ def test_search():
     start = Molecule('C1CC=CC1')
     end = Molecule('C1CC2C(Cl)(Cl)C2C1')
 
+    score, m_out, path = Search.search(end, start)
+
     #TODO: fix this example!!
     start = Molecule('C1C([CH3])([OH])CCCC1')
     end = Molecule('C1C([CH3])=CCCC1')
@@ -1364,7 +1406,6 @@ def test_search():
     start = Molecule('CCCC#C')
     end = Molecule('CCCC=O')
 
-    score, m_out, path = Search.search(end, start)
     
 
 def test_implicit_hydrogen_stereochemistry():
@@ -1375,11 +1416,35 @@ def test_implicit_hydrogen_stereochemistry():
 
     m2 = Molecule("Br[C@@](I)Cl")
     assert(m == m2)
+
+def deep_print(obj):
+    def deep_print_helper(obj):
+        """Recursively call str() on all sub-parts of an object
+        example: a list of objects
+        """
+        if isinstance(obj,tuple):
+            return tuple([deep_print_helper(i) for i in obj])
+        elif isinstance(obj,dict):
+            return "dict(" + str([(deep_print_helper(k),deep_print_helper(v)) for k,v in obj.items()]) + ")"
+        elif isinstance(obj,list):
+            return [deep_print_helper(i) for i in obj]
+        else:
+            return str(obj)
+    print deep_print_helper(obj)
+
     
 if __name__ == "__main__":
     rxn_setup()
     # test_search()
 
     # test_reactions()
-    
-    print find_substructure(Substructure("[*:1]C"),Molecule("C"))
+
+    # print find_substructure(Substructure("[*:1]C"),Molecule("C"))
+
+    # m = Molecule("C[C@@](C)(Br)CO")
+    # for a in m.explicit_atoms:
+    #     print m.bond_summary_str()
+
+    # test_reactions()
+
+    test_search()
