@@ -374,11 +374,15 @@ class Structure(object):
                     out.append((str(a1), str(a2), str(bond_type)))
         return out
     def remove_atom(self, atom1):
-        self.explicit_atoms.remove(atom1)
-        self.bonds.pop(atom1)
-        self.ordered_bonds.pop(atom1)
+        if atom1 in self.explicit_atoms:
+            self.explicit_atoms.remove(atom1)
+            self.bonds.pop(atom1)
+            self.ordered_bonds.pop(atom1)
+        else:
+            self.implicit_atoms.remove(atom1)
         if atom1 in self.chirality:
             self.chirality.pop(atom1)
+
     def remove_bond(self, atom1, atom2, bond_type):
         if not self.bonds.get(atom1,{}).get(atom2,None) or\
            not self.bonds.get(atom2,{}).get(atom1,None):
@@ -931,39 +935,46 @@ def is_counter_subset(counter1, counter2):
             return False
     return True
 
+
+########substructure matching########
 def find_substructure(substruct, mol):
     #atom -> (bond_type, atom_type) -> cnt
     # mol_cnts = dict((a,counter(a.bond_summaries())) for a in mol.atoms)
     substruct.setup_dfs()
     mol.setup_dfs()
-    def is_bond_subset(atom1, atom2):
-        #need a mapping from atom1's bonds to a subset of atom2's bonds
-        bonds1 = atom1.bond_summary()
-        n1 = len(bonds1)
-        bonds2 = atom2.bond_summary()
-        n2 = len(bonds2)
-        if n2 < n1:
-            return False
-        #try all mappings one at a time and see if any work
-        for bonds2_subset in itertools.permutations(bonds2,n1):
-            match = True
-            for b1, b2 in zip(bonds1, bonds2_subset):
-                a1, bond_type1 = b1
-                a2, bond_type2 = b2
-                if not a1.matches_atom(a2) or not bond_type1 == bond_type2:
-                    match = False
-            if match:
-                # print "true"
-                return True
-        # print "false"
-        return False
 
-    possibilities = {}
-    for a1 in substruct.explicit_atoms:
-        for a2 in mol.explicit_atoms + mol.implicit_atoms: #allow matching to hydrogens if necessary
-            if a1.matches_atom(a2) and is_bond_subset(a1, a2):
-                possibilities.setdefault(a1,[]).append(a2)
+    possibilities = gen_possibilities(substruct, mol, {})
     return match_substructure_helper(substruct, mol, possibilities, {}, {})
+
+def is_bond_subset(atom1, atom2, matches):
+    #need a mapping from atom1's bonds to a subset of atom2's bonds
+    bonds1 = atom1.bond_summary()
+    n1 = len(bonds1)
+    bonds2 = atom2.bond_summary()
+    n2 = len(bonds2)
+    if n2 < n1:
+        return False
+    #try all mappings one at a time and see if any work
+    for bonds2_subset in itertools.permutations(bonds2,n1):
+        match = True
+        for b1, b2 in zip(bonds1, bonds2_subset):
+            a1, bond_type1 = b1
+            a2, bond_type2 = b2
+            if not a1.matches_atom(a2) or not bond_type1 == bond_type2 or (a1 in matches and a2 != matches[a1]):
+                match = False
+        if match:
+            # print "true"
+            return True
+    # print "false"
+    return False
+
+def gen_possibilities(sub_mol, mol, matches):
+    possibilities = {}
+    for a1 in sub_mol.explicit_atoms:
+        for a2 in mol.explicit_atoms + mol.implicit_atoms: #allow matching to hydrogens if necessary
+            if a1.matches_atom(a2) and is_bond_subset(a1, a2, matches):
+                possibilities.setdefault(a1,[]).append(a2)
+    return possibilities
 
 def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
     """matches = [(atom from sub_mol, mapped atom from mol)]"""
@@ -1017,7 +1028,7 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
 
     #recursion
     out = []
-    for a1 in sub_mol.explicit_atoms:
+    for a1 in sorted(sub_mol.explicit_atoms, key = lambda x: len(possibilities.get(x,[]))):
         if a1 in matches:
             continue
         if a1 not in possibilities:
@@ -1026,10 +1037,11 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
             if m is not None and m in matches.values(): #don't map two atoms from sub_mol to the same atom in mol
                 continue
             matches[a1] = m
-            out += match_substructure_helper(sub_mol, mol, possibilities, matches, done)
+            out += match_substructure_helper(sub_mol, mol, gen_possibilities(sub_mol,mol,matches), matches, done)
             matches.pop(a1)
         break #only process one atom from sub_mol.explicit_atoms, then break
     return out
+########## end substructure matching ##########
 
 class Search(object):
     @classmethod
@@ -1139,13 +1151,10 @@ def rxn_setup():
 
     #mcmurray 7.4
     all_retros["oxymercuration"] = Retro("Oxymercuration", [Reaction('[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])')])
-
     #mcmurray 7.5
-    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]'), Reaction('[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]')])
+    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[*:1][C@@:3]([*:2])([H])[C@@:4]([*:5])([*:6])[O] >> [*:1]\[C:3](\[*:2])=[C:4](/[*:5])\[*:6]', constraints = [Markovnikov("3","4")])])
 
-    #mcmurray 7.5
-    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]'), Reaction('[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]')])
-    
+    #mcmurray 7.6
     all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", [Reaction('[CH2:1][CH3:2]>>[CH1:1]=[CH2:2]'), Reaction('[CH3:1][CH3:2]>>[CH2:1]=[CH2:2]'), Reaction('[CH1:1][CH3:2]>>[CH1:1]=[CH2:2]'), Reaction('[CH2:1][CH2:2]>>[CH:1]=[CH:2]'), Reaction('[CH2:1][CH:2]>>[CH:1]=[CH0:2]'), Reaction('[CH:1][CH:2]>>[CH0:1]=[CH0:2]')])
 
     all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", [Reaction('[C:1]([OH])[C:2]([OH])>>[C:1]=[C:2]')])
@@ -1467,25 +1476,21 @@ def deep_print(obj):
     
 if __name__ == "__main__":
     rxn_setup()
-    # test_search()
 
-    # test_reactions()
-
-    # print find_substructure(Substructure("[*:1]C"),Molecule("C"))
-
-    # m = Molecule("C[C@@](C)(Br)CO")
-    # for a in m.explicit_atoms:
-    #     print m.bond_summary_str()
-
-    # test_reactions()
-
-    # test_search()
 
     # mcmurray 7.5
     # all_retros["hydroboration"] = Retro("Hydroboration", ['[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]', '[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]'])
-    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[H][C:1][C:2][O]>>[C:1]=[C:2]', constraints = [Markovnikov("1","2")])])
+    # all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[H][C:1][C:2][O]>>[C:1]=[C:2]', constraints = [Markovnikov("1","2")])])
     
-    start = (Molecule('CCC[OH]'),)
-    end = Molecule('CC(C)=C')
-    print all_retros["hydroboration"].run(start)[0][0]
+    # start = (Molecule('CC(C)(C)C[OH]'),)
+    # end = Molecule('CC(C)=C')
+    # print all_retros["hydroboration"].run(start)[0][0]
     # assert(all_retros["alkyne_hydroboration"].run(start1)[0] == end1)
+
+    # print(Substructure("[H][C:1][C:2][O]"))
+    # print list(get_chunks("[H][C:1][C:2][O]"))
+
+    
+    start = (Molecule('CC(C)C[OH]'),)
+    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[*:1][C@@:3]([*:2])([H])[C@@:4]([*:5])([*:6])[O] >> [*:1]\[C:3](\[*:2])=[C:4](/[*:5])\[*:6]', constraints = [Markovnikov("3","4")])])
+    print all_retros["hydroboration"].run(start)[0][0]
