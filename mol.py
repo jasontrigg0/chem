@@ -489,10 +489,14 @@ class Molecule(Structure):
 class Substructure(Structure):
     """
     """
-    def __init__(self,smiles):
+    def __init__(self,smiles,constraints=None):
         super(Substructure,self).__init__()
         smiles = self.preprocess_smiles(smiles)
         self.append_smiles_clause(smiles, template=True)
+
+        self.constraints = []
+        if constraints:
+            self.constraints = constraints
     @classmethod
     def preprocess_smiles(self, smiles):
         #substructures have special meaning for "."
@@ -533,6 +537,29 @@ class Substructure(Structure):
         smiles = [s for i,s in enumerate(smiles) if i not in to_delete]
         smiles = "".join(smiles)
         return smiles
+
+class Constraint(object):
+    def test(self, struct, mol, matches):
+        raise Exception("Unimplemented")
+
+class Markovnikov(Constraint):
+    def __init__(self, label1, label2):
+        """initialize markovnikov with -- the carbon at label1 is *more*
+        substituted than the carbon at label2
+        """
+        self.label1 = str(label1)
+        self.label2 = str(label2)
+    def test(self, struct, mol, matches):
+        if not self.label1 in struct.label2atom or not self.label2 in struct.label2atom:
+            raise Exception("ERROR: markovnikov labels not present in substructure")
+        a1 = matches[struct.label2atom[self.label1]]
+        a2 = matches[struct.label2atom[self.label2]]
+        if not a1.elt == "C" or not a2.elt == "C":
+            raise Exception("ERROR: non-carbon markovnikov constraint atoms detected")
+        
+        subs1 = len([n for n,_ in mol.ordered_bonds[a1] if n.elt == "C"])
+        subs2 = len([n for n,_ in mol.ordered_bonds[a2] if n.elt == "C"])
+        return subs1 > subs2
         
 def map_labels(mol1, mol2):
     """use the labels in mol1, mol2 to
@@ -546,14 +573,14 @@ def map_labels(mol1, mol2):
     
 
 class Reaction(object):
-    def __init__(self, smarts):
+    def __init__(self, smarts, constraints = None):
         self.smarts = smarts
         #http://www.daylight.com/dayhtml/doc/theory/theory.smarts.html
         #4.5 Component-level grouping of SMARTS
         #C.(C.C)
         smiles1, smiles2 = smarts.split(">>",1)
         smiles1 = smiles1.strip(); smiles2 = smiles2.strip()
-        self.reactant_template = Substructure(smiles1)
+        self.reactant_template = Substructure(smiles1, constraints = constraints)
         self.product_template = Substructure(smiles2)
     def run(self, reactants_tuple):
         reactants_mol = Molecule.merge(reactants_tuple)
@@ -621,9 +648,9 @@ class Reaction(object):
         return self.smarts
 
 class Retro(object):
-    def __init__(self, name, rxn_string_list):
+    def __init__(self, name, rxn_list):
         self.__name__ = name
-        self.rxn_list = [Reaction(r) for r in rxn_string_list]
+        self.rxn_list = rxn_list
     def __str__(self):
         return self.__name__
     def run(self, reactants):
@@ -955,6 +982,11 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
                 if matches[neighbor] is None: continue
                 if not (matches[neighbor], bond_type) in mol.get_bonds(b1):
                     return [] #no match!
+            #check constraints (eg markovnikov)
+            if isinstance(sub_mol,Substructure):
+                for c in sub_mol.constraints:
+                    if not c.test(sub_mol, mol, matches):
+                        return []
             #check chirality if necessary:
             if a1 in sub_mol.chirality and matches[a1] in mol.chirality:
                 atoms1 = [matches[n] for n,_ in sub_mol.ordered_bonds[a1]]
@@ -1091,66 +1123,71 @@ all_retros = {}
     
 def rxn_setup():
     #mcmurray 6.8-6.9
-    all_retros["hydrobromination"] = Retro("Hydrobromination", ['[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]','[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+    all_retros["hydrobromination"] = Retro("Hydrobromination", [Reaction('[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]'),Reaction('[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])')])
 
     #mcmurray 7.1
-    all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", ['[*:1]/[C:2](/[*:3])=[C:4](\[*:5])(/[*:6]) >> [*:1][C@@H:2]([*:3])[C@@:4]([*:5])([*:6])Br'])
+    all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", [Reaction('[*:1]/[C:2](/[*:3])=[C:4](\[*:5])(/[*:6]) >> [*:1][C@@H:2]([*:3])[C@@:4]([*:5])([*:6])Br')])
 
     #mcmurray 7.1
-    all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
+    # all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
 
     #mcmurray 7.2
-    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", ['[*:2][C@@:1]([*:3])(F)[C@:4](F)([*:6])[*:5] >> [*:2]\[C:1](\[*:3])=[C:4](\[*:5])/[*:6]'])
+    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", [Reaction('[*:2][C@@:1]([*:3])(F)[C@:4](F)([*:6])[*:5] >> [*:2]\[C:1](\[*:3])=[C:4](\[*:5])/[*:6]')])
     
     #mcmurray 7.3
-    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+    # all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
     #mcmurray 7.3
-    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C@@:2]([C:3])(Br)[C@:4]([*:6])([*:7])[OH]>>[C:1]\[C:2](\[C:3])=[C:4](/[*:6])(\[*:7])', '[C:1][C@@:2]([*:3])(Br)[C@:4]([!C:5])([!C:6])[OH]>>[C:1]\[C:2](\[*:3])=[C:4](/[*:5])(\[*:6])'])
+    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", [Reaction('[C:1][C@@:2]([C:3])(Br)[C@:4]([*:6])([*:7])[OH]>>[C:1]\[C:2](\[C:3])=[C:4](/[*:6])(\[*:7])'), Reaction('[C:1][C@@:2]([*:3])(Br)[C@:4]([!C:5])([!C:6])[OH]>>[C:1]\[C:2](\[*:3])=[C:4](/[*:5])(\[*:6])')])
 
-    all_retros["oxymercuration"] = Retro("Oxymercuration", ['[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
+    #mcmurray 7.4
+    all_retros["oxymercuration"] = Retro("Oxymercuration", [Reaction('[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])')])
 
-    all_retros["hydroboration"] = Retro("Hydroboration", ['[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]', '[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]'])
+    #mcmurray 7.5
+    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]'), Reaction('[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]')])
 
-    all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", ['[CH2:1][CH3:2]>>[CH1:1]=[CH2:2]', '[CH3:1][CH3:2]>>[CH2:1]=[CH2:2]', '[CH1:1][CH3:2]>>[CH1:1]=[CH2:2]', '[CH2:1][CH2:2]>>[CH:1]=[CH:2]', '[CH2:1][CH:2]>>[CH:1]=[CH0:2]', '[CH:1][CH:2]>>[CH0:1]=[CH0:2]'])
+    #mcmurray 7.5
+    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]'), Reaction('[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]')])
+    
+    all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", [Reaction('[CH2:1][CH3:2]>>[CH1:1]=[CH2:2]'), Reaction('[CH3:1][CH3:2]>>[CH2:1]=[CH2:2]'), Reaction('[CH1:1][CH3:2]>>[CH1:1]=[CH2:2]'), Reaction('[CH2:1][CH2:2]>>[CH:1]=[CH:2]'), Reaction('[CH2:1][CH:2]>>[CH:1]=[CH0:2]'), Reaction('[CH:1][CH:2]>>[CH0:1]=[CH0:2]')])
 
-    all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", ['[C:1]([OH])[C:2]([OH])>>[C:1]=[C:2]'])
+    all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", [Reaction('[C:1]([OH])[C:2]([OH])>>[C:1]=[C:2]')])
 
-    all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", ['[C:1]1C(Cl)(Cl)[C:2]1>>[C:1]=[C:2]'])
+    all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", [Reaction('[C:1]1C(Cl)(Cl)[C:2]1>>[C:1]=[C:2]')])
 
-    all_retros["simmons_smith"] = Retro("Simmons-Smith", ['[C:1]1[CH2][C:2]1>>[C:1]=[C:2]'])
+    all_retros["simmons_smith"] = Retro("Simmons-Smith", [Reaction('[C:1]1[CH2][C:2]1>>[C:1]=[C:2]')])
 
-    all_retros["ozonolysis"] = Retro("Ozonolysis", ["[C:1]=O.[C:2]=O >> [C:1]=[C:2]"])
+    all_retros["ozonolysis"] = Retro("Ozonolysis", [Reaction("[C:1]=O.[C:2]=O >> [C:1]=[C:2]")])
 
     # all_retros["esterification"] = Retro("esterification",["C(=O)O.OCC>>C(=O)OCC.O"]))
 
-    all_retros["kmno4"] = Retro("KMnO4", ['[C:1]([C:2])([C:3])=O.[C:4]([C:5])([C:6])=O>>[C:1]([C:2])([C:3])=[C:4]([C:5])([C:6])',
-                                          '[C:3][C:1](=O)[OH].[C:2](=O)(=O) >> [C:3][CH:1]=[CH2:2]'])
+    all_retros["kmno4"] = Retro("KMnO4", [Reaction('[C:1]([C:2])([C:3])=O.[C:4]([C:5])([C:6])=O>>[C:1]([C:2])([C:3])=[C:4]([C:5])([C:6])'),
+                                          Reaction('[C:3][C:1](=O)[OH].[C:2](=O)(=O) >> [C:3][CH:1]=[CH2:2]')])
 
-    all_retros["diol_1_2_oxidative_cleavage"] = Retro("Diol 1 2 Oxidative Cleavage", ['[C:1]=O.[C:2]=O>>[C:1]([OH])[C:2]([OH])'])
+    all_retros["diol_1_2_oxidative_cleavage"] = Retro("Diol 1 2 Oxidative Cleavage", [Reaction('[C:1]=O.[C:2]=O>>[C:1]([OH])[C:2]([OH])')])
 
-    all_retros["dehydrohalogenation_vicinal_dihalides"] = Retro("Dehydrohalogenation Vicinal Dihalides", ['[C:1][C:2]#[C:3][C:4] >> [C:1][C:2](Br)[C:3](Br)[C:4]'])
+    all_retros["dehydrohalogenation_vicinal_dihalides"] = Retro("Dehydrohalogenation Vicinal Dihalides", [Reaction('[C:1][C:2]#[C:3][C:4] >> [C:1][C:2](Br)[C:3](Br)[C:4]')])
 
-    all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", ['[CH:1]#[C:2][C:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3][Br]',
-                                                 '[C:1][C:2]#[C:3][CH2:4][C:5] >> [C:1][C:2]#[CH:3].[C:5][CH2:4][Br]'])
+    all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", [Reaction('[CH:1]#[C:2][C:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3][Br]'),
+                                                                                Reaction('[C:1][C:2]#[C:3][CH2:4][C:5] >> [C:1][C:2]#[CH:3].[C:5][CH2:4][Br]')])
 
-    all_retros["alkyne_plus_HX"] = Retro("Alkyne Plus HX", ['[C:1][C:2](Br)(Br)[CH3:3] >> [C:1][C:2](Br)=[CH2:3]', '[C:1][C:2](Br)=[CH2:3] >> [C:1][C:2]#[CH:3]'])
+    all_retros["alkyne_plus_HX"] = Retro("Alkyne Plus HX", [Reaction('[C:1][C:2](Br)(Br)[CH3:3] >> [C:1][C:2](Br)=[CH2:3]'), Reaction('[C:1][C:2](Br)=[CH2:3] >> [C:1][C:2]#[CH:3]')])
 
-    all_retros["alkyne_plus_X2"] = Retro("Alkyne Plus X2", ['[C:1][C:2](Br)(Br)[C:3](Br)(Br)[C:4] >> Br\[C:2]([C:1])=[C:3]([C:4])/Br', 'Br\[C:2]([C:1])=[C:3]([C:4])/Br >> [C:1][C:2]#[C:3][C:4]'])
+    all_retros["alkyne_plus_X2"] = Retro("Alkyne Plus X2", [Reaction('[C:1][C:2](Br)(Br)[C:3](Br)(Br)[C:4] >> Br\[C:2]([C:1])=[C:3]([C:4])/Br'), Reaction('Br\[C:2]([C:1])=[C:3]([C:4])/Br >> [C:1][C:2]#[C:3][C:4]')])
 
-    all_retros["alkyne_mercuric_hydration"] = Retro("Alkyne Mercuric Hydration", ['[C:1][C:2](=O)[CH3:3] >> [C:1][C:2]#[CH:3]'])
+    all_retros["alkyne_mercuric_hydration"] = Retro("Alkyne Mercuric Hydration", [Reaction('[C:1][C:2](=O)[CH3:3] >> [C:1][C:2]#[CH:3]')])
 
-    all_retros["alkyne_hydroboration"] = Retro("Alkyne Hydroboration", ['[C:1][CH2:2][CH:3](=O) >> [C:1][C:2]#[CH:3]'])
+    all_retros["alkyne_hydroboration"] = Retro("Alkyne Hydroboration", [Reaction('[C:1][CH2:2][CH:3](=O) >> [C:1][C:2]#[CH:3]')])
 
-    all_retros["alkyne_hydrogenation_paladium"] = Retro("Alkyne Hydrogenation Paladium", ['[C:1][CH2:2][CH2:3][C:4] >> [C:1][C:2]#[C:3][C:4]'])
+    all_retros["alkyne_hydrogenation_paladium"] = Retro("Alkyne Hydrogenation Paladium", [Reaction('[C:1][CH2:2][CH2:3][C:4] >> [C:1][C:2]#[C:3][C:4]')])
 
-    all_retros["alkyne_hydrogenation_lindlar"] = Retro("Alkyne Hydrogenation Lindlar", ['[C:1]\[CH:2]=[CH:3]/[C:4] >> [C:1][C:2]#[C:3][C:4]'])
+    all_retros["alkyne_hydrogenation_lindlar"] = Retro("Alkyne Hydrogenation Lindlar", [Reaction('[C:1]\[CH:2]=[CH:3]/[C:4] >> [C:1][C:2]#[C:3][C:4]')])
 
-    all_retros["alkyne_hydrogenation_lithium"] = Retro("Alkyne Hydrogenation Lithium", ['[C:1]\[CH:2]=[CH:3]\[C:4] >> [C:1][C:2]#[C:3][C:4]'])
+    all_retros["alkyne_hydrogenation_lithium"] = Retro("Alkyne Hydrogenation Lithium", [Reaction('[C:1]\[CH:2]=[CH:3]\[C:4] >> [C:1][C:2]#[C:3][C:4]')])
 
-    all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", ['[CH:1]#[C:2][CH2:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3]Br', '[C:1][C:2]#[C:3][CH2:4][C:5]  >> [C:1][C:2]#[CH:3].[C:5][CH2:4]Br'])
+    all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", [Reaction('[CH:1]#[C:2][CH2:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3]Br'), Reaction('[C:1][C:2]#[C:3][CH2:4][C:5]  >> [C:1][C:2]#[CH:3].[C:5][CH2:4]Br')])
 
-    all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", ['[C:1][C:2](=O)[OH].[C:4][C:3](=O)[OH] >> [C:1][C:2]#[C:3][C:4]'])
+    all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", [Reaction('[C:1][C:2](=O)[OH].[C:4][C:3](=O)[OH] >> [C:1][C:2]#[C:3][C:4]')])
     
 def test_retro():
     print "Creating reactant"
@@ -1376,19 +1413,15 @@ def test_search():
     start = Molecule('C1CC=CC1')
     end = Molecule('C1CC([OH])CC1')
 
-    #Dichlorocarbene Addition -> Alkene Hydrogenation
+    #Dichlorocarbene Addition
     start = Molecule('C1CC=CC1')
     end = Molecule('C1CC2C(Cl)(Cl)C2C1')
-
-    score, m_out, path = Search.search(end, start)
 
     #TODO: fix this example!!
     start = Molecule('C1C([CH3])([OH])CCCC1')
     end = Molecule('C1C([CH3])=CCCC1')
 
-    # start = Molecule('CC=CC(C)C')
-    # end = 
-
+    #Hydroboration
     start = Molecule('CC(C)=C')
     end = Molecule('CC(C)C[OH]')
 
@@ -1401,6 +1434,8 @@ def test_search():
     #alkyne hydroboration
     start = Molecule('[CH3][CH2]C#[CH]')
     end = Molecule('CCCC=O')
+
+    score, m_out, path = Search.search(end, start)
 
     #TODO: fix this example!!
     start = Molecule('CCCC#C')
@@ -1447,4 +1482,13 @@ if __name__ == "__main__":
 
     # test_reactions()
 
-    test_search()
+    # test_search()
+
+    # mcmurray 7.5
+    # all_retros["hydroboration"] = Retro("Hydroboration", ['[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]', '[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]'])
+    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[H][C:1][C:2][O]>>[C:1]=[C:2]', constraints = [Markovnikov("1","2")])])
+    
+    start = (Molecule('CCC[OH]'),)
+    end = Molecule('CC(C)=C')
+    print all_retros["hydroboration"].run(start)[0][0]
+    # assert(all_retros["alkyne_hydroboration"].run(start1)[0] == end1)
