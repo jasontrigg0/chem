@@ -62,9 +62,9 @@ class Structure(object):
         self.cis = {} 
         self.trans = {} 
 
-        self.up_bonds = {} #atom1 -> [atom2]
-        self.down_bonds = {} #atom1 -> [atom2]
-        
+        self.up_bonds = {} #atom1 -> [atom2] where atom1 is part of a double bond
+        self.down_bonds = {} #atom1 -> [atom2] where atom1 is part of a double bond
+
         self.atom2component = {} #atom : component#
         self.component2root = {} #component# : atom
         
@@ -225,7 +225,15 @@ class Structure(object):
         #so re-add the bonds:
         for a,v in self.bonds.items():
             for a2,bond in v.items():
-                out.add_bond(atom_map[a],atom_map[a2],bond)
+                try:
+                    out.add_bond(atom_map[a],atom_map[a2],bond)
+                except:
+                    deep_print(self.explicit_atoms)
+                    deep_print(self.implicit_atoms)
+                    deep_print(self.bonds)
+                    print a,a2
+                    print self
+                    raise
 
 
         out.c_double_bonds = [set([atom_map[a1],atom_map[a2]]) for a1,a2 in self.c_double_bonds]
@@ -243,7 +251,7 @@ class Structure(object):
 
         out.up_bonds = dict([(atom_map[k],[atom_map[v] for v in vlist]) for k,vlist in self.up_bonds.items()])
         out.down_bonds = dict([(atom_map[k],[atom_map[v] for v in vlist]) for k,vlist in self.down_bonds.items()])
-                
+
         out.setup_dfs()
         return out, atom_map
     
@@ -274,6 +282,8 @@ class Structure(object):
         self.up_bonds.setdefault(atom1,[]).append(atom2)
         self.down_bonds.setdefault(atom2,[]).append(atom1)
         self.update_cis_trans()
+    def cis_trans_atoms(self):
+        return [a for pair in self.cis.keys() + self.trans.keys() for a in pair]
     def update_cis_trans(self):
         #check all C=C bonds
         for a1, a2 in self.c_double_bonds:
@@ -313,6 +323,16 @@ class Structure(object):
                 assert(len(other_neighbors) <= 1)
                 if other_neighbors:
                     up2 = other_neighbors[0]
+
+            #ignore hydrogens
+            if up1 and up1.elt == "H":
+                up1 = None
+            if up2 and up2.elt == "H":
+                up2 = None
+            if down1 and down1.elt == "H":
+                down1 = None
+            if down2 and down2.elt == "H":
+                down2 = None
 
             #save the cis/trans information
             c1 = []
@@ -598,9 +618,7 @@ class Reaction(object):
                     mol_to_transform.remove_bond(m[a1], m[neighbor], bond_type)
                 if not a1 in self.reactant_template.atom2label:
                     mol_to_transform.remove_atom(m[a1])
-            #remove all implicit atoms+bonds:
-            mol_to_transform.implicit_atoms = []
-            mol_to_transform.implicit_bonds = {}
+
             def add_atom_copy(old_atom, new_mol):
                 old_mol = old_atom.struct
                 new_atom = Atom(str(old_atom), new_mol)
@@ -622,24 +640,31 @@ class Reaction(object):
                     new_atom = add_atom_copy(a2, mol_to_transform)
                     products_map[a2] = new_atom
 
-            #add all the reaction product bonds:
+            #add all the product template bonds:
             for a2 in self.product_template.explicit_atoms:
                 for neighbor, bond_type in self.product_template.ordered_bonds.get(a2,[]):
                     if not neighbor in products_map:
-                        # print "missing from mapping!"
+                        #print "missing from mapping!"
                         #create new atom and add to mapping
                         new_atom = add_atom_copy(neighbor, mol_to_transform)
                         products_map[neighbor] = new_atom
-                    #because for loop goes through
-                    #all molecule atoms along with all neighbors
-                    #only add up_bonds to avoid overcounting
-                    if neighbor in self.product_template.up_bonds.get(a2,[]):
+                    #loop goes through all molecule atoms along with all neighbors
+                    #so only add up_bonds to avoid overcounting
+                    if neighbor in self.product_template.up_bonds.get(a2,[]) and not products_map[neighbor].elt == "H" and not products_map[a2].elt == "H": #bugfix: don't store up_bonds/down_bonds to hydrogen
+                        print mol_to_transform, products_map[a2], products_map[neighbor]
+                        deep_print(mol_to_transform.up_bonds)
                         mol_to_transform.add_up_bond(products_map[a2], products_map[neighbor])
-                    mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
+                        deep_print(mol_to_transform.up_bonds)
+                    if products_map[a2] in mol_to_transform.explicit_atoms and products_map[neighbor] in mol_to_transform.explicit_atoms: #bugfix: only add bonds between explicit atoms in reactant
+                        mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
             #update mol_to_transform.chirality:
             for a in mol_to_transform.explicit_atoms:
                 if a in mol_to_transform.chirality and not mol_to_transform.is_chiral_atom(a):
                     mol_to_transform.chirality.pop(a)
+
+            #remove all implicit atoms+bonds:
+            mol_to_transform.implicit_atoms = []
+            mol_to_transform.implicit_bonds = {}
             #add back implicit atoms + bonds
             mol_to_transform.add_implicit_hydrogens()
             product_set = tuple(mol_to_transform.split(),)
@@ -880,9 +905,9 @@ def smiles_helper(mol, atom):
     parent = mol.parent.get(atom,None)
     out = ""
     if parent:
-        if atom in mol.up_bonds.get(parent,{}):
+        if atom in mol.up_bonds.get(parent,{}) and atom in mol.cis_trans_atoms():
             out += Bond.up_bond
-        elif atom in mol.down_bonds.get(parent,{}):
+        elif atom in mol.down_bonds.get(parent,{}) and atom in mol.cis_trans_atoms():
             out += Bond.down_bond
         else:
             out += str(mol.bonds[atom][parent])
@@ -1037,7 +1062,15 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
             if m is not None and m in matches.values(): #don't map two atoms from sub_mol to the same atom in mol
                 continue
             matches[a1] = m
-            out += match_substructure_helper(sub_mol, mol, gen_possibilities(sub_mol,mol,matches), matches, done)
+            
+            poss_cnt = 1
+            for v in possibilities.values():
+                poss_cnt *= len(v)
+            if poss_cnt > 10000: #reprocess possibilities only if we have a lot because the function call is expensive
+                next_poss = gen_possibilities(sub_mol,mol,matches)
+            else:
+                next_poss = possibilities
+            out += match_substructure_helper(sub_mol, mol, next_poss, matches, done)
             matches.pop(a1)
         break #only process one atom from sub_mol.explicit_atoms, then break
     return out
@@ -1045,10 +1078,11 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
 
 class Search(object):
     @classmethod
-    def search(self, end, start=None):
+    def search(self, end, start=None, verbose=False):
         q = Queue.PriorityQueue()
         i = (self.score(end, start),end,[])
-        print "Starting: ",(i[0], str(i[1]), i[2])
+        if verbose:
+            print "Starting: ",(i[0], str(i[1]), i[2])
         done_list = set([]) #list of mols we have already checked
         q.put(i)
         while not q.empty():
@@ -1057,20 +1091,24 @@ class Search(object):
             if m in done_list:
                 continue
             done_list.add(m)
-            print done_list
-            print "Searching... ", (val, str(m), path)
+            if verbose:
+                print done_list
+                print "Searching... ", (val, str(m), path)
             if self.score(m,start) < -0.99:
                 return val,str(m),list(reversed(path))
                 break #synthesis complete
             for rxn in all_retros.values():
-                print "Trying {rxn}...".format(**vars())
+                if verbose:
+                    print "Trying {rxn}...".format(**vars())
                 out = rxn.run([m])
                 if out:
                     for product_set in out:
                         for new_mol in product_set:
                             if new_mol:
-                                print "Reaction result: " + str([str(new_mol)])
-                                print self.score(new_mol,start)
+                                if verbose:
+                                    print new_mol
+                                    print "Reaction result: " + str([str(new_mol)])
+                                    print self.score(new_mol,start)
                                 i = (self.score(new_mol,start),new_mol,path+[str(rxn)])
                                 q.put(i)
     @classmethod
@@ -1132,13 +1170,14 @@ all_retros = {}
     
 def rxn_setup():
     #mcmurray 6.8-6.9
+    #TODO: use markovnikov constraint
     all_retros["hydrobromination"] = Retro("Hydrobromination", [Reaction('[C:1][C:2]([C:3])(Br)[C:4]>>[C:1][C:2]([C:3])=[C:4]'),Reaction('[C:1][C:2](Br)[C:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])')])
 
     #mcmurray 7.1
     all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", [Reaction('[*:1]/[C:2](/[*:3])=[C:4](\[*:5])(/[*:6]) >> [*:1][C@@H:2]([*:3])[C@@:4]([*:5])([*:6])Br')])
 
     #mcmurray 7.1
-    # all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", ['[C:1]=[C:2] >> [C:1][C:2]O'])
+    all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", [Reaction('[C:1]=[C:2] >> [C:1][C:2]O')])
 
     #mcmurray 7.2
     all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", [Reaction('[*:2][C@@:1]([*:3])(F)[C@:4](F)([*:6])[*:5] >> [*:2]\[C:1](\[*:3])=[C:4](\[*:5])/[*:6]')])
@@ -1150,14 +1189,14 @@ def rxn_setup():
     all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", [Reaction('[C:1][C@@:2]([C:3])(Br)[C@:4]([*:6])([*:7])[OH]>>[C:1]\[C:2](\[C:3])=[C:4](/[*:6])(\[*:7])'), Reaction('[C:1][C@@:2]([*:3])(Br)[C@:4]([!C:5])([!C:6])[OH]>>[C:1]\[C:2](\[*:3])=[C:4](/[*:5])(\[*:6])')])
 
     #mcmurray 7.4
-    all_retros["oxymercuration"] = Retro("Oxymercuration", [Reaction('[C:1][C:2]([C:3])([OH])[CH:4]>>[C:1][C:2]([C:3])=[C:4]'), Reaction('[C:1][C:2]([OH])[CH:3]([!C:4])([!C:5])>>[C:1][C:2]=[C:3]([*:4])([*:5])')])
+    all_retros["oxymercuration"] = Retro("Oxymercuration", [Reaction('[C:1]([OH])[C:2]>>[C:1]=[C:2]', constraints = [Markovnikov("1","2")])])
     #mcmurray 7.5
     all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[*:1][C@@:3]([*:2])([H])[C@@:4]([*:5])([*:6])[O] >> [*:1]\[C:3](\[*:2])=[C:4](/[*:5])\[*:6]', constraints = [Markovnikov("3","4")])])
 
     #mcmurray 7.6
-    all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", [Reaction('[CH2:1][CH3:2]>>[CH1:1]=[CH2:2]'), Reaction('[CH3:1][CH3:2]>>[CH2:1]=[CH2:2]'), Reaction('[CH1:1][CH3:2]>>[CH1:1]=[CH2:2]'), Reaction('[CH2:1][CH2:2]>>[CH:1]=[CH:2]'), Reaction('[CH2:1][CH:2]>>[CH:1]=[CH0:2]'), Reaction('[CH:1][CH:2]>>[CH0:1]=[CH0:2]')])
+    all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", [Reaction('[*:1][C@@:3]([*:2])([H])[C@@:4]([*:5])([*:6])[H] >> [*:1]\[C:3](\[*:2])=[C:4](/[*:5])\[*:6]')])
 
-    all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", [Reaction('[C:1]([OH])[C:2]([OH])>>[C:1]=[C:2]')])
+    all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", [Reaction('[*:1][C@@:3]([*:2])([O])[C@@:4]([*:5])([*:6])[O] >> [*:1]\[C:3](\[*:2])=[C:4](/[*:5])\[*:6]')])
 
     all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", [Reaction('[C:1]1C(Cl)(Cl)[C:2]1>>[C:1]=[C:2]')])
 
@@ -1283,6 +1322,10 @@ def test_reactions():
     end1 = (Molecule("ClC=CBr"),)
     assert(all_retros["ozonolysis"].run(start1)[0] == end1)
 
+    start = (Molecule("CC=CC(C)C"),)
+    end = (Molecule("CC=O.CC(C)C=O"),)
+    assert(all_retros["ozonolysis"].run(end)[0][0] == start[0])
+    
     start1 = [Molecule("C(C)(C)=O"),Molecule("C(C)(C)=O")]
     end1 = (Molecule("CC(C)=C(C)C"),)
     assert(all_retros["kmno4"].run(start1)[0] == end1)
@@ -1411,42 +1454,62 @@ def test_cis_trans():
     assert(m1 != m3)
 
 def test_search():
-    #Alkene Hydroxylation
+    #McMurray 7.26 (pg 239)
+    
+    #Alkene Hydroxylation (X)
     start = Molecule('C1CC=CC1')
     end = Molecule('C1C([OH])C([OH])CC1')
 
-    #Hydroboration
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ['Alkene Hydroxylation'])
+    
+    #Hydroboration (currently blocked by markovnikov condition)
     start = Molecule('C1CC=CC1')
     end = Molecule('C1CC([OH])CC1')
 
-    #Dichlorocarbene Addition
+    #Dichlorocarbene Addition (X)
     start = Molecule('C1CC=CC1')
     end = Molecule('C1CC2C(Cl)(Cl)C2C1')
 
-    #TODO: fix this example!!
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ["Dichlorocarbene Addition"])
+    
+    #Alcohol dehydration (X)
     start = Molecule('C1C([CH3])([OH])CCCC1')
     end = Molecule('C1C([CH3])=CCCC1')
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ["Alcohol Dehydration"])
 
-    #Hydroboration
+    #Hydroboration (X)
     start = Molecule('CC(C)=C')
     end = Molecule('CC(C)C[OH]')
 
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ["Hydroboration"])
+    
     ####alkyne test cases
+    #McMurray 8.29 (pg 271)
 
-    #alkyne mercuric hydration
+    #alkyne mercuric hydration (X)
     start = Molecule('[CH3][CH2]C#[CH]')
     end = Molecule('[CH3][CH2]C(=O)[CH3]')
 
-    #alkyne hydroboration
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ["Alkyne Mercuric Hydration"])
+
+    #alkyne hydroboration (X)
     start = Molecule('[CH3][CH2]C#[CH]')
     end = Molecule('CCCC=O')
 
     score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ["Alkyne Hydroboration"])
 
-    #TODO: fix this example!!
-    start = Molecule('CCCC#C')
-    end = Molecule('CCCC=O')
+    #should be oxidative cleavage but doesn't work with search
+    # start = Molecule('CCCC#C')
+    # end = Molecule('CCC(O)=O')
 
+    # score, m_out, path = Search.search(end, start, verbose=True)
+    # assert(score == -1 and path == ["Alkyne Oxidative Cleavage"])
     
 
 def test_implicit_hydrogen_stereochemistry():
@@ -1477,20 +1540,9 @@ def deep_print(obj):
 if __name__ == "__main__":
     rxn_setup()
 
+    # test_search()
 
-    # mcmurray 7.5
-    # all_retros["hydroboration"] = Retro("Hydroboration", ['[C:1][C:2]([C:3])[CH:4]([OH])>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2][CH2:3][OH]>>[C:1][C:2]=[C:3]', '[C:1][CH:2]([OH])[CH2:3][C:4]>>[C:1][C:2]=[C:3][C:4]'])
-    # all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[H][C:1][C:2][O]>>[C:1]=[C:2]', constraints = [Markovnikov("1","2")])])
-    
-    # start = (Molecule('CC(C)(C)C[OH]'),)
-    # end = Molecule('CC(C)=C')
-    # print all_retros["hydroboration"].run(start)[0][0]
-    # assert(all_retros["alkyne_hydroboration"].run(start1)[0] == end1)
-
-    # print(Substructure("[H][C:1][C:2][O]"))
-    # print list(get_chunks("[H][C:1][C:2][O]"))
-
-    
-    start = (Molecule('CC(C)C[OH]'),)
-    all_retros["hydroboration"] = Retro("Hydroboration", [Reaction('[*:1][C@@:3]([*:2])([H])[C@@:4]([*:5])([*:6])[O] >> [*:1]\[C:3](\[*:2])=[C:4](/[*:5])\[*:6]', constraints = [Markovnikov("3","4")])])
-    print all_retros["hydroboration"].run(start)[0][0]
+    start = Molecule("CCCCC=C")
+    end = Molecule("CCCCC#C")
+    # start = Molecule("C=CCCC#C")
+    score, m_out, path = Search.search(end, start, verbose=True)
