@@ -255,11 +255,6 @@ class Structure(object):
         else:
             return
         self.component_bonds.setdefault(atom1,[]).append((atom2, is_same_component_boolean))
-    def is_chiral_atom(self, atom):
-        bond_cnt = len(self.ordered_bonds.get(atom,[]))
-        hydrogen = atom.hydrogen_cnt()
-        neighbor_cnt = bond_cnt + hydrogen
-        return neighbor_cnt == 4 or (neighbor_cnt == 3 and atom.elt == "C")
     def get_bonds(self, atom):
         out = []
         for a2, bond_type in self.bonds.get(atom,{}).items() + self.implicit_bonds.get(atom,{}).items():
@@ -522,6 +517,8 @@ class Reaction(object):
                     label = self.product_template.atom2label[a2]
                     reactant = self.reactant_template.label2atom[label]
                     products_map[a2] = m[reactant]
+                    # below line prints the label mappings (eg Cl -> 1, Br -> 2, ...)
+                    # print label, products_map[a2]
                 else:
                     new_atom = add_atom_copy(a2, mol_to_transform)
                     products_map[a2] = new_atom
@@ -530,15 +527,16 @@ class Reaction(object):
             for a2 in self.product_template.explicit_atoms:
                 for neighbor, bond_type in self.product_template.ordered_bonds.get(a2,[]):
                     if not neighbor in products_map:
-                        #print "missing from mapping!"
-                        #create new atom and add to mapping
                         new_atom = add_atom_copy(neighbor, mol_to_transform)
                         products_map[neighbor] = new_atom
                     if products_map[a2] in mol_to_transform.explicit_atoms and products_map[neighbor] in mol_to_transform.explicit_atoms: #bugfix: only add bonds between explicit atoms in reactant
                         mol_to_transform.add_bond(products_map[a2], products_map[neighbor], bond_type)
+                        
             #update mol_to_transform.chirality:
+            for a in self.product_template.chirality:
+                mol_to_transform.chirality[products_map[a]] = self.product_template.chirality[a]
             for a in mol_to_transform.explicit_atoms:
-                if a in mol_to_transform.chirality and not mol_to_transform.is_chiral_atom(a):
+                if a in mol_to_transform.chirality and not a.is_chiral():
                     mol_to_transform.chirality.pop(a)
 
             #remove all implicit atoms+bonds:
@@ -622,6 +620,14 @@ class AtomType(object):
         return elt2cnt[self.name]
     def cur_bond_cnt(self):
         return sum(b.bond_cnt for b in self.bonds().values())
+    def cur_neighbor_cnt(self):
+        return len(self.bonds())
+    def is_chiral(self):
+        bond_cnt = self.cur_bond_cnt()
+        neighbor_cnt = self.cur_neighbor_cnt()
+        if neighbor_cnt <= 2:
+            return False #carbons not chiral in BrC#CBr
+        return bond_cnt == 4 or (bond_cnt == 3 and self.elt == "C")
     def bonds(self):
         return self.struct.bonds.get(self,{})
     def __str__(self):
@@ -751,7 +757,7 @@ def compare_stereochemistry(bonded_atoms1, bonded_atoms2):
     if not allenal and not tetrahedral:
         deep_print(bonded_atoms1)
         deep_print(bonded_atoms2)
-        raise
+        raise Exception("trying to compare stereochemistry of two atoms with unequal neighbor count or < 3 neighbors (ie non-chiral)")
     perm = {}
     for i1,a1 in enumerate(bonded_atoms1):
         for i2,a2 in enumerate(bonded_atoms2):
@@ -791,7 +797,7 @@ def smiles_helper(mol, atom):
         out += str(mol.bonds[atom][parent])
     #check how the dfs ordering compares with the stereochemistry:
     stereo_str = ""
-    if atom in mol.chirality:
+    if atom in mol.chirality and atom.is_chiral():
         mol_neighbors = [n for n,_ in mol.ordered_bonds[atom]]
         smiles_neighbors = []
         if mol.parent.get(atom,None):
@@ -918,7 +924,7 @@ def match_substructure_helper(sub_mol, mol, possibilities, matches, done):
                     return []
             #check allenal chirality:
             for c1,c2 in sub_mol.c_double_bonds:
-                if c1 not in sub_mol.chirality or c2 not in sub_mol.chirality:
+                if c1 not in sub_mol.chirality or c2 not in sub_mol.chirality or matches[c1] not in mol.chirality or matches[c2] not in mol.chirality:
                     continue
                 atoms_submol_c1 = [matches[n] for n,_ in sub_mol.ordered_bonds[c1]]
                 atoms_mol_c1 = [n for n,_ in mol.ordered_bonds[matches[c1]]]
@@ -1087,7 +1093,7 @@ def rxn_setup():
     # all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
 
     #mcmurray 7.3
-    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", [Reaction('[C:1][C@@:2]([C:3])(Br)[C@:4]([*:6])([*:7])[OH]>>[C:1][C@@:2]([C:3])=[C@:4]([*:6])([*:7])'), Reaction('[C:1][C@@:2]([*:3])(Br)[C@:4]([!C:5])([!C:6])[OH]>>[C:1][C@@:2]([*:3])=[C@:4]([*:5])([*:6])')])
+    all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", [Reaction('[*:1][C@@:2]([*:3])(Br)[C@:4]([*:6])([*:7])[OH]>>[*:1][C@@:2]([*:3])=[C@:4]([*:6])([*:7])', constraints = [Markovnikov("2","4")])])
 
     #mcmurray 7.4
     all_retros["oxymercuration"] = Retro("Oxymercuration", [Reaction('[C:1]([OH])[C:2]>>[C:1]=[C:2]', constraints = [Markovnikov("1","2")])])
@@ -1134,6 +1140,8 @@ def rxn_setup():
     all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", [Reaction('[CH:1]#[C:2][CH2:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3]Br'), Reaction('[C:1][C:2]#[C:3][CH2:4][C:5]  >> [C:1][C:2]#[CH:3].[C:5][CH2:4]Br')])
 
     all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", [Reaction('[C:1][C:2](=O)[OH].[C:4][C:3](=O)[OH] >> [C:1][C:2]#[C:3][C:4]')])
+
+    all_retros["invert_chirality"] = Retro("Invert Chirality", [Reaction('[*:1][C@]([*:2])([*:3])[*:4] >> [*:1][C@@]([*:2])([*:3])[*:4]')])
     
 def test_retro():
     print "Creating reactant"
@@ -1161,8 +1169,6 @@ def test_reactions():
     
     #hydrobromination
     start1 = Molecule("CC(C)(Br)C")
-    # print all_retros["hydrobromination"].run([start1])[0][0] == Molecule("CC(C)=C")
-    # raise
     assert(all_retros["hydrobromination"].run([start1])[0] == (Molecule("CC(C)=C"),))
 
     #dehydrohalogenation
@@ -1172,22 +1178,21 @@ def test_reactions():
 
     
     #alcohol_dehydration
-    # start1 = (Molecule("C=CCCC"),)
+    start1 = (Molecule("C=CCCC"),)
     #TODO:
     #smarter SMILES printing: eg
     #C(CC(C)O)C
     #would look better as
     #CCCC(O)C
-    # end = ((Molecule("CCCCCO"),),(Molecule("CCCC(O)C"),))
-    # out = all_retros["alcohol_dehydration"].run(start1)
-    # assert(set(end) == set(out))
+    end = ((Molecule("CCCCCO"),),(Molecule("CCCC(O)C"),))
+    out = all_retros["alcohol_dehydration"].run(start1)
+    assert(set(end) == set(out))
 
     #[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]
     start1 = (Molecule("C[C@@](Cl)(F)[C@](C)(Cl)F"),)
     end1 = (Molecule("Cl[C@](C)=[C@](C)Cl"),)
-    deep_print(all_retros["alkene_plus_x2"].run(start1)[0])
     assert(all_retros["alkene_plus_x2"].run(start1)[0] == end1)
-
+    
     start1 = (Molecule("CC(C)(Br)CO"),)
     end1 = (Molecule("CC(C)=C"),)
     assert(all_retros["halohydrin_formation"].run(start1)[0] == end1)
@@ -1447,7 +1452,7 @@ def deep_print(obj):
 
     
 if __name__ == "__main__":
-    # rxn_setup()
+    rxn_setup()
 
     # # test_search()
 
@@ -1455,4 +1460,5 @@ if __name__ == "__main__":
     # end = Molecule("CCCCC#C")
     # # start = Molecule("C=CCCC#C")
     # score, m_out, path = Search.search(end, start, verbose=True)
+
     test_reactions()
