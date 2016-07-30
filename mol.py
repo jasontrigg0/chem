@@ -57,6 +57,7 @@ class Structure(object):
         self.children = {}
         self.parent = {}
         self.ring_bonds = {} #used by DFS: {atom1: [(bond_type,label_number)]}
+        self.ring_bond_labels = {} #{label: [(atom,bond_type)]}
 
         #chirality of tetrahedral bonds
         self.chirality = {}
@@ -68,7 +69,6 @@ class Structure(object):
         self.atom2component = {} #atom : component#
         self.component2root = {} #component# : atom
 
-        self.ring_bond_labels = {} #{label: [(atom,bond_type)]}
     def append_smiles_clause(self, smiles_clause, atom = None, template=False):
         if atom == None:
             atom = self.last_atom()
@@ -219,11 +219,10 @@ class Structure(object):
                     print self
                     raise
 
-
         out.c_double_bonds = [set([atom_map[a1],atom_map[a2]]) for a1,a2 in self.c_double_bonds]
         out.c_double_bond_atoms = set([atom_map[a] for a in self.c_double_bond_atoms])
 
-        out.setup_dfs()
+        out.setup_dfs() #sets up the ring bonds
         return out, atom_map
     
     def last_atom(self):
@@ -255,6 +254,15 @@ class Structure(object):
         else:
             return
         self.component_bonds.setdefault(atom1,[]).append((atom2, is_same_component_boolean))
+    def add_ring_bond(self, atom1, atom2, bond_type):
+        if self.ring_bond_labels:
+            next_ring_label = max([int(i) for i in self.ring_bond_labels.keys()]) + 1
+        else:
+            next_ring_label = 1
+        self.ring_bonds.setdefault(atom1,[]).append((bond_type, next_ring_label))
+        self.ring_bonds.setdefault(atom2,[]).append((bond_type, next_ring_label))
+        self.ring_bond_labels.setdefault(next_ring_label,[]).append((atom1, bond_type))
+        self.ring_bond_labels.setdefault(next_ring_label,[]).append((atom2, bond_type))
     def get_bonds(self, atom):
         out = []
         for a2, bond_type in self.bonds.get(atom,{}).items() + self.implicit_bonds.get(atom,{}).items():
@@ -299,10 +307,10 @@ class Structure(object):
         self.children = {}
         self.parent = {}
         self.ring_bonds = {}
+        self.ring_bond_labels = {}
         self.atom2component = {}
         self.component2root = {}
         curr_component = 1
-        curr_ring_label = 1
         done = set()
         stack = collections.deque()
         while len(self.atom2component) < len(self.explicit_atoms):
@@ -320,9 +328,7 @@ class Structure(object):
                 curr_atom, parent, bond_type = stack.pop()
                 if curr_atom in done:
                     #second time we've reached this atom --> ring bond!
-                    self.ring_bonds.setdefault(curr_atom,[]).append((bond_type, curr_ring_label))
-                    self.ring_bonds.setdefault(parent,[]).append((bond_type, curr_ring_label))
-                    curr_ring_label += 1
+                    self.add_ring_bond(curr_atom, parent, bond_type)
                 else:
                     if parent:
                         self.parent[curr_atom] = parent
@@ -800,8 +806,15 @@ def smiles_helper(mol, atom):
     if atom in mol.chirality and atom.is_chiral():
         mol_neighbors = [n for n,_ in mol.ordered_bonds[atom]]
         smiles_neighbors = []
-        if mol.parent.get(atom,None):
-            smiles_neighbors += [mol.parent[atom]]
+        if parent:
+            smiles_neighbors += [parent]
+        if atom in mol.ring_bonds:
+            #Currently only supporting one ring bond for an atom --
+            #is >1 possible?
+            assert(len(mol.ring_bonds[atom]) == 1)
+            label = mol.ring_bonds[atom][0][1]
+            assert(len(mol.ring_bond_labels[label]) == 2)
+            smiles_neighbors += [i[0] for i in mol.ring_bond_labels[label] if i[0] != atom]
         smiles_neighbors += children
         if atom.implicit_hydrogen_cnt() > 0:
             assert(len(smiles_neighbors) == len(mol_neighbors))
