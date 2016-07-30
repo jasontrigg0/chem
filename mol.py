@@ -113,7 +113,6 @@ class Structure(object):
                     a2,b2 = self.ring_bond_labels[ring_bond_label][1]
                     if b1 != b2:
                         raise Exception("ERROR: ring bonds with same label ({ring_bond_label}) have different bonds".format(**vars()))
-                    
                     self.add_bond(a1,a2,b1)
             self.add_atom(next_atom)
             atom = self.last_atom()
@@ -385,6 +384,8 @@ class Molecule(Structure):
         bits = "".join([str(1 *new_print.GetBit(i)) for i in range(num_bits)])
         return int(bits,2)
     def similarity(self, other):
+        return 0.5 * (self.rdkit_sim(other) + self.autochem_sim(other))
+    def rdkit_sim(self, other):
         if not isinstance(other, Molecule):
             raise
         rdkit1 = Chem.MolFromSmiles(str(self))
@@ -393,7 +394,47 @@ class Molecule(Structure):
         f_start = FingerprintMols.FingerprintMol(rdkit2)
         sim = DataStructs.FingerprintSimilarity(f_end, f_start)
         return sim
+    def autochem_sim(self, other):
+        """create our own measure of similarity because the rdkit measure 
+        isn't very effective for searching
+        """
+        #carbon cnt
+        c1 = len([a for a in self.explicit_atoms if a.elt == "C"])
+        c2 = len([a for a in other.explicit_atoms if a.elt == "C"])
+        carbon_sim = 1 * (c1 == c2)
+        
+        #bonds on the carbon backbone
+        def get_cbond_cnts(m):
+            cbonds1 = []
+            for a1 in m.bonds:
+                if not a1.elt == "C": continue
+                for a2 in m.bonds[a1]:
+                    if not a2.elt == "C": continue
+                    cbonds1.append(m.bonds[a1][a2])
+            cbonds_cnt = counter(cbonds1, key = lambda x: x.bond_cnt)
+            return cbonds_cnt
 
+        cbonds1_cnt = get_cbond_cnts(self)
+        cbonds2_cnt = get_cbond_cnts(other)
+        matched = 0
+        total = 0
+        for bond_type in set(cbonds1_cnt.keys() + cbonds2_cnt.keys()):
+            cnt1 = cbonds1_cnt.get(bond_type,0)
+            cnt2 = cbonds2_cnt.get(bond_type,0)
+            matched += min(cnt1, cnt2)
+            total += max(cnt1, cnt2)
+        single = max(cbonds1_cnt.get(1,0), cbonds2_cnt.get(2,0))
+        non_single = 1 - single / float(total) #pct of carbon bonds that are not single bonds
+        cbond_sim = matched / float(total)
+
+        #penalize complexity somewhat
+        total = 0.5 * (carbon_sim + cbond_sim)
+        total -= (c1 != c2) * (2 - 1 / float(c1) - 1 / float(c2))
+        total -= (cbond_sim != 1) * (non_single)
+        
+        #TODO: non-carbon cnts
+        return total
+        
 class Substructure(Structure):
     """
     """
@@ -564,7 +605,7 @@ class Retro(object):
         return self.__name__
     def run(self, reactants):
         if not (isinstance(reactants,tuple) or isinstance(reactants,list)):
-            raise
+            raise Exception("Reactants not a tuple/list type")
         if not all([isinstance(r,Structure) for r in reactants]):
             raise
         return Retro.run_once(reactants,self.rxn_list)
@@ -848,15 +889,15 @@ def counter(l, key=lambda x: x):
         cnts[k] = cnts.get(k,0) + 1
     return cnts
 
-def is_subset(list1, list2):
-    return is_counter_subset(counter(list1),counter(list2))
+# def is_subset(list1, list2):
+#     return is_counter_subset(counter(list1),counter(list2))
 
-def is_counter_subset(counter1, counter2):
-    #check that counter1 < counter2
-    for k1,v1 in counter1.items():
-        if v1 > counter2.get(k1,0):
-            return False
-    return True
+# def is_counter_subset(counter1, counter2):
+#     #check that counter1 < counter2
+#     for k1,v1 in counter1.items():
+#         if v1 > counter2.get(k1,0):
+#             return False
+#     return True
 
 
 ########substructure matching########
@@ -1401,13 +1442,12 @@ def test_search():
     #Alkene Hydroxylation (X)
     start = Molecule('C1CC=CC1')
     end = Molecule('C1C([OH])C([OH])CC1')
-
     score, m_out, path = Search.search(end, start)
     assert(score == -1 and path == ['Alkene Hydroxylation'])
     
     #Hydroboration (currently blocked by markovnikov condition)
-    start = Molecule('C1CC=CC1')
-    end = Molecule('C1CC([OH])CC1')
+    # start = Molecule('C1CC=CC1')
+    # end = Molecule('C1CC([OH])CC1')
 
     #Dichlorocarbene Addition (X)
     start = Molecule('C1CC=CC1')
@@ -1442,18 +1482,20 @@ def test_search():
     #alkyne hydroboration (X)
     start = Molecule('[CH3][CH2]C#[CH]')
     end = Molecule('CCCC=O')
-
     score, m_out, path = Search.search(end, start)
     assert(score == -1 and path == ["Alkyne Hydroboration"])
 
-    #should be oxidative cleavage but doesn't work with search
-    # start = Molecule('CCCC#C')
-    # end = Molecule('CCC(O)=O')
+    start = Molecule('CCC#C')
+    end = Molecule('CCC(O)=O')
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ["Alkyne Oxidative Cleavage"])
 
-    # score, m_out, path = Search.search(end, start, verbose=True)
-    # assert(score == -1 and path == ["Alkyne Oxidative Cleavage"])
+    start = Molecule('CCCCC=C')
+    end = Molecule('CCCCC#C')
+    score, m_out, path = Search.search(end, start)
+    assert(score == -1 and path == ['Alkene Plus X2', 'Dehydrohalogenation Vicinal Dihalides'])
+
     
-
 def test_implicit_hydrogen_stereochemistry():
     #implicit H is treated as the second neighbor of the carbon
     m = Molecule("Br[C@](Cl)I")
@@ -1484,11 +1526,10 @@ def deep_print(obj):
 if __name__ == "__main__":
     rxn_setup()
 
-    # # test_search()
+    test_search()
 
     # start = Molecule("CCCCC=C")
+    # mid = Molecule("CCCCC(Br)CBr")
     # end = Molecule("CCCCC#C")
     # # start = Molecule("C=CCCC#C")
     # score, m_out, path = Search.search(end, start, verbose=True)
-
-    test_reactions()
