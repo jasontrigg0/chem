@@ -1089,18 +1089,12 @@ def rxn_setup():
 
     #mcmurray 7.1
     all_retros["dehydrohalogenation"] = Retro("Dehydrohalogenation", [Reaction('[*:1][C@:2]([*:3])=[C@@:4]([*:5])([*:6]) >> [*:1][C@@H:2]([*:3])[C@@:4]([*:5])([*:6])Br')])
-    # start1 = (Molecule("I[C@@](Cl)=[C@@](I)Cl"),)
-    # start1 = (Molecule("Cl[C@](I)=[C@@](I)Cl"),)
-
-    #Cl up, I down = I up, Cl down
-    # -> I front, Cl back - Cl front, I back
-    # end1 = (Molecule("I[C@@](Cl)[C@](Cl)(I)Br"),)
 
     #mcmurray 7.1
     all_retros["alcohol_dehydration"] = Retro("Alcohol Dehydration", [Reaction('[C:1]=[C:2] >> [C:1][C:2]O')])
 
     #mcmurray 7.2
-    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", [Reaction('[*:2][C@@:1]([*:3])(F)[C@:4](F)([*:6])[*:5] >> [*:2][C@@:1]([*:3])=[C@@:4]([*:5])[*:6]')])
+    all_retros["alkene_plus_x2"] = Retro("Alkene Plus X2", [Reaction('[*:2][C@@:1]([*:3])(Br)[C@:4](Br)([*:6])[*:5] >> [*:2][C@@:1]([*:3])=[C@@:4]([*:5])[*:6]')])
     
     #mcmurray 7.3
     # all_retros["halohydrin_formation"] = Retro("Halohydrin Formation", ['[C:1][C:2]([C:3])(Br)[C:4][OH]>>[C:1][C:2]([C:3])=[C:4]', '[C:1][C:2](Br)[C:3]([!C:4])([!C:5])[OH]>>[C:1][C:2]=[C:3]([*:4])([*:5])'])
@@ -1116,44 +1110,66 @@ def rxn_setup():
     #mcmurray 7.6
     all_retros["alkene_hydrogenation"] = Retro("Alkene Hydrogenation", [Reaction('[*:1][C@@:3]([*:2])([H])[C@@:4]([*:5])([*:6])[H] >> [*:1][C@@:3]([*:2])=[C@:4]([*:5])[*:6]')])
 
+    #mucmurray 7.8
     all_retros["alkene_hydroxylation"] = Retro("Alkene Hydroxylation", [Reaction('[*:1][C@@:3]([*:2])([O])[C@@:4]([*:5])([*:6])[O] >> [*:1][C@@:3]([*:2])=[C@:4]([*:5])[*:6]')])
 
+    #mcmurray 7.6
     all_retros["dichlorocarbene_addition"] = Retro("Dichlorocarbene Addition", [Reaction('[C:1]1C(Cl)(Cl)[C:2]1>>[C:1]=[C:2]')])
 
+    #mcmurray 7.6
     all_retros["simmons_smith"] = Retro("Simmons-Smith", [Reaction('[C:1]1[CH2][C:2]1>>[C:1]=[C:2]')])
 
+    #mcmurray 7.8
     all_retros["ozonolysis"] = Retro("Ozonolysis", [Reaction("[C:1]=O.[C:2]=O >> [C:1]=[C:2]")])
 
     # all_retros["esterification"] = Retro("esterification",["C(=O)O.OCC>>C(=O)OCC.O"]))
 
+    #mcmurray 7.8
     all_retros["kmno4"] = Retro("KMnO4", [Reaction('[C:1]([C:2])([C:3])=O.[C:4]([C:5])([C:6])=O>>[C:1]([C:2])([C:3])=[C:4]([C:5])([C:6])'),
                                           Reaction('[C:3][C:1](=O)[OH].[C:2](=O)(=O) >> [C:3][CH:1]=[CH2:2]')])
 
+    #mcmurray 7.9
     all_retros["diol_1_2_oxidative_cleavage"] = Retro("Diol 1 2 Oxidative Cleavage", [Reaction('[C:1]=O.[C:2]=O>>[C:1]([OH])[C:2]([OH])')])
 
-    all_retros["dehydrohalogenation_vicinal_dihalides"] = Retro("Dehydrohalogenation Vicinal Dihalides", [Reaction('[C:1][C:2]#[C:3][C:4] >> [C:1][C:2](Br)[C:3](Br)[C:4]')])
+    #mcmurray 8.3
+    all_retros["dehydrohalogenation_vicinal_dihalides"] = Retro("Dehydrohalogenation Vicinal Dihalides", [Reaction('[C:1]#[C:2] >> Br[C:1][C:2]Br')])
 
+    #mcmurray 8.9
     all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", [Reaction('[CH:1]#[C:2][C:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3][Br]'),
                                                                                 Reaction('[C:1][C:2]#[C:3][CH2:4][C:5] >> [C:1][C:2]#[CH:3].[C:5][CH2:4][Br]')])
 
+    #mcmurray 8.4
     all_retros["alkyne_plus_HX"] = Retro("Alkyne Plus HX", [Reaction('[C:1][C:2](Br)(Br)[CH3:3] >> [C:1][C:2](Br)=[CH2:3]'), Reaction('[C:1][C:2](Br)=[CH2:3] >> [C:1][C:2]#[CH:3]')])
 
+    #mcmurray 8.4
     all_retros["alkyne_plus_X2"] = Retro("Alkyne Plus X2", [Reaction('[C:1][C:2](Br)(Br)[C:3](Br)(Br)[C:4] >> Br[C@@:2]([C:1])=[C@@:3]([C:4])Br'), Reaction('Br[C@@:2]([C:1])=[C@@:3]([C:4])Br >> [C:1][C:2]#[C:3][C:4]')])
 
+    #mcmurray 8.5
     all_retros["alkyne_mercuric_hydration"] = Retro("Alkyne Mercuric Hydration", [Reaction('[C:1][C:2](=O)[CH3:3] >> [C:1][C:2]#[CH:3]')])
 
+    #mcmurray 8.5
     all_retros["alkyne_hydroboration"] = Retro("Alkyne Hydroboration", [Reaction('[C:1][CH2:2][CH:3](=O) >> [C:1][C:2]#[CH:3]')])
 
+    #mcmurray 8.6
     all_retros["alkyne_hydrogenation_paladium"] = Retro("Alkyne Hydrogenation Paladium", [Reaction('[C:1][CH2:2][CH2:3][C:4] >> [C:1][C:2]#[C:3][C:4]')])
 
+    #mcmurray 8.6
     all_retros["alkyne_hydrogenation_lindlar"] = Retro("Alkyne Hydrogenation Lindlar", [Reaction('[C:1][C@@H:2]=[C@@H:3][C:4] >> [C:1][C:2]#[C:3][C:4]')])
 
+    #mcmurray 8.6
     all_retros["alkyne_hydrogenation_lithium"] = Retro("Alkyne Hydrogenation Lithium", [Reaction('[C:1][C@@H:2]=[C@H:3][C:4] >> [C:1][C:2]#[C:3][C:4]')])
 
+    #mcmurray 8.8
+    #create acetylide anions?
+    
+    #mcmurray 8.8
     all_retros["acetylide_ion_alkylation"] = Retro("Acetylide Ion Alkylation", [Reaction('[CH:1]#[C:2][CH2:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3]Br'), Reaction('[C:1][C:2]#[C:3][CH2:4][C:5]  >> [C:1][C:2]#[CH:3].[C:5][CH2:4]Br')])
 
-    all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", [Reaction('[C:1][C:2](=O)[OH].[C:4][C:3](=O)[OH] >> [C:1][C:2]#[C:3][C:4]')])
+    #mcmurray 8.7
+    # all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", [Reaction('[*:1][C:2](=O)[OH].[*:4][C:3](=O)[OH] >> [*:1][C:2]#[C:3][*:4]')])
+    all_retros["alkyne_oxidative_cleavage"] = Retro("Alkyne Oxidative Cleavage", [Reaction('[*:2][C:1](=O)[OH] >> C#[C:1][*:2]')])
 
+    #test reaction that just inverts the chirality of a chiral carbon
     all_retros["invert_chirality"] = Retro("Invert Chirality", [Reaction('[*:1][C@]([*:2])([*:3])[*:4] >> [*:1][C@@]([*:2])([*:3])[*:4]')])
     
 def test_retro():
@@ -1202,7 +1218,7 @@ def test_reactions():
     assert(set(end) == set(out))
 
     #[*:2][C@@:1](F)([*:3])[C@:4](F)([*:6])[*:5] >> [*:2][C:1]([*:3])=[C:4]([*:5])[*:6]
-    start1 = (Molecule("C[C@@](Cl)(F)[C@](C)(Cl)F"),)
+    start1 = (Molecule("C[C@@](Cl)(Br)[C@](C)(Cl)Br"),)
     end1 = (Molecule("Cl[C@](C)=[C@](C)Cl"),)
     assert(all_retros["alkene_plus_x2"].run(start1)[0] == end1)
     
@@ -1296,8 +1312,9 @@ def test_reactions():
     out1 = all_retros["acetylide_ion_alkylation"].run(start1)[0]
     assert(set(out1) == set(end1))
 
-    start1 = (Molecule("CC(=O)O"),Molecule("CC(=O)O"))
-    end1 = (Molecule("CC#CC"),)
+    #alkyne_oxidative_cleavage simplified for now -- R group is just a hydrogen
+    start1 = (Molecule("CC(=O)O"),)
+    end1 = (Molecule("CC#C"),)
     assert(all_retros["alkyne_oxidative_cleavage"].run(start1)[0] == end1)
 
     
