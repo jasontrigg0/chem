@@ -384,7 +384,7 @@ class Molecule(Structure):
         bits = "".join([str(1 *new_print.GetBit(i)) for i in range(num_bits)])
         return int(bits,2)
     def similarity(self, other):
-        return 0.5 * (self.rdkit_sim(other) + self.autochem_sim(other))
+        return self.rdkit_sim(other) #0.5 * (self.rdkit_sim(other) + self.autochem_sim(other))
     def rdkit_sim(self, other):
         if not isinstance(other, Molecule):
             raise
@@ -429,8 +429,8 @@ class Molecule(Structure):
 
         #penalize complexity somewhat
         total = 0.5 * (carbon_sim + cbond_sim)
-        total -= (c1 != c2) * (2 - 1 / float(c1) - 1 / float(c2))
-        total -= (cbond_sim != 1) * (non_single)
+        # total -= (c1 != c2) * (2 - 1 / float(c1) - 1 / float(c2))
+        # total -= (cbond_sim != 1) * (non_single)
         
         #TODO: non-carbon cnts
         return total
@@ -1064,7 +1064,7 @@ class Search(object):
                                     print new_mol
                                     print "Reaction result: " + str([str(new_mol)])
                                     print self.score(new_mol,start)
-                                i = (self.score(new_mol,start),new_mol,path+[str(rxn)])
+                                i = (self.score(new_mol,start) + 0.5 * len(path),new_mol,path+[str(rxn)])
                                 q.put(i)
     @classmethod
     def score(self, end, start=None):
@@ -1166,7 +1166,7 @@ def rxn_setup():
     # all_retros["esterification"] = Retro("esterification",["C(=O)O.OCC>>C(=O)OCC.O"]))
 
     #mcmurray 7.8
-    all_retros["kmno4"] = Retro("KMnO4", [Reaction('[C:1]([C:2])([C:3])=O.[C:4]([C:5])([C:6])=O>>[C:1]([C:2])([C:3])=[C:4]([C:5])([C:6])'),
+    all_retros["kmno4"] = Retro("KMnO4", [Reaction('[C:1]([*:2])([*:3])=O.[C:4]([*:5])([*:6])=O>>[C:1]([*:2])([*:3])=[C:4]([*:5])([*:6])'),
                                           Reaction('[C:3][C:1](=O)[OH].[C:2](=O)(=O) >> [C:3][CH:1]=[CH2:2]')])
 
     #mcmurray 7.9
@@ -1443,6 +1443,7 @@ def test_search():
     start = Molecule('C1CC=CC1')
     end = Molecule('C1C([OH])C([OH])CC1')
     score, m_out, path = Search.search(end, start)
+    print(score, m_out, path)
     assert(score == -1 and path == ['Alkene Hydroxylation'])
     
     #Hydroboration (currently blocked by markovnikov condition)
@@ -1493,7 +1494,7 @@ def test_search():
     start = Molecule('CCCCC=C')
     end = Molecule('CCCCC#C')
     score, m_out, path = Search.search(end, start)
-    assert(score == -1 and path == ['Alkene Plus X2', 'Dehydrohalogenation Vicinal Dihalides'])
+    assert(path == ['Alkene Plus X2', 'Dehydrohalogenation Vicinal Dihalides'])
 
     
 def test_implicit_hydrogen_stereochemistry():
@@ -1528,8 +1529,20 @@ if __name__ == "__main__":
 
     test_search()
 
-    # start = Molecule("CCCCC=C")
-    # mid = Molecule("CCCCC(Br)CBr")
-    # end = Molecule("CCCCC#C")
-    # # start = Molecule("C=CCCC#C")
+    # start = Molecule("CC(C)CC#C")
+    # end = Molecule("CC(C)")
+    # score, m_out, path = Search.search(end, start, verbose=True)
+
+
+    # start = Molecule('CCCCC=C')
+    # end = Molecule('CCCCC#C')
+    # score, m_out, path = Search.search(end, start, verbose=True)
+    
+    # start = Molecule("CCCC#C")
+    # end = Molecule("CCCC=O")
+    # score, m_out, path = Search.search(end, start, verbose=True)
+
+
+    # start = Molecule("CCCCC#C")
+    # end = Molecule("CCCC[C@]1C[C@@]1C")
     # score, m_out, path = Search.search(end, start, verbose=True)
