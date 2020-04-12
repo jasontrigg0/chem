@@ -1249,11 +1249,6 @@ def test_reactions():
     
     #alcohol_dehydration
     start1 = (Molecule("C=CCCC"),)
-    #TODO:
-    #smarter SMILES printing: eg
-    #C(CC(C)O)C
-    #would look better as
-    #CCCC(O)C
     end = ((Molecule("CCCCCO"),),(Molecule("CCCC(O)C"),))
     out = all_retros["alcohol_dehydration"].run(start1)
     assert(set(end) == set(out))
@@ -1527,7 +1522,7 @@ def deep_print(obj):
 if __name__ == "__main__":
     rxn_setup()
 
-    test_search()
+    # test_search()
 
     # start = Molecule("CC(C)CC#C")
     # end = Molecule("CC(C)")
@@ -1546,3 +1541,9 @@ if __name__ == "__main__":
     # start = Molecule("CCCCC#C")
     # end = Molecule("CCCC[C@]1C[C@@]1C")
     # score, m_out, path = Search.search(end, start, verbose=True)
+
+    start = Molecule('CCCCC=C')
+    end = Molecule('CCCCC#C')
+    score, m_out, path = Search.search(end, start, verbose=True)
+    assert(path == ['Alkene Plus X2', 'Dehydrohalogenation Vicinal Dihalides'])
+    

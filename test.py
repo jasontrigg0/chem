@@ -96,7 +96,7 @@ class Reaction(object):
             #invalid number of reactants
             return reactants
         for m in products:
-            print Chem.MolToSmiles(m)
+            # print Chem.MolToSmiles(m)
             Chem.SanitizeMol(m)
         products = cls.drop_duplicates(products)
         if products:
@@ -234,7 +234,7 @@ class Alkene_Hydroxylation(Reaction):
 class DichlorocarbeneAddition(Reaction):
     @classmethod
     def reverse(self, m):
-        rxn1 = AllChem.ReactionFromSmarts('[C:1]C(Cl)(Cl)[C:2]>>[C:1]=[C:2]')
+        rxn1 = AllChem.ReactionFromSmarts('[C:1]1C(Cl)(Cl)[C:2]1>>[C:1]=[C:2]')
         return Reaction.run_once(m,[rxn1])
 
 class SimmonsSmith(Reaction):
@@ -271,8 +271,7 @@ RXN_LIST = [Hydrobromination, Dehydrohalogenation, AlcoholDehydration, Alkene_Pl
                                                  '[C:1][C:2]#[C:3][CH2:4][C:5] >> [C:1][C:2]#[CH:3].[C:5][CH2:4][Br]']),
             Reaction('Alkyne_Plus_HX', ['[C:1][C:2](Br)(Br)[CH3:3] >> [C:1][C:2](Br)=[CH2:3]',
                                         '[C:1][C:2](Br)=[CH2:3] >> [C:1][C:2]#[CH:3]']),
-            Reaction('Alkyne_Plus_X2', ['[C:1][C:2](Br)(Br)[C:3](Br)(Br)[C:4] >> Br\[C:2]([C:1])=[C:3]([C:4])/Br',
-                                        'Br\[C:2]([C:1])=[C:3]([C:4])/Br >> [C:1][C:2]#[C:3][C:4]']),
+            Reaction('Alkyne_Plus_X2', ['[C:1][C:2](Br)(Br)[C:3](Br)(Br)[C:4] >> Br\[C:2]([C:1])=[C:3]([C:4])/Br', 'Br\[C:2]([C:1])=[C:3]([C:4])/Br >> [C:1][C:2]#[C:3][C:4]']),
             Reaction('Alkyne_Mercuric_Hydration', ['[C:1][C:2](=O)[CH3:3] >> [C:1][C:2]#[CH:3]']),
             Reaction('Alkyne_Hydroboration', ['[C:1][CH2:2][CH:3](=O) >> [C:1][C:2]#[CH:3]']),
             Reaction('Alkyne_Hydrogenation_Paladium', ['[C:1][CH2:2][CH2:3][C:4] >> [C:1][C:2]#[C:3][C:4]']),
@@ -333,18 +332,6 @@ def basic_test():
     AllChem.GenerateDepictionMatching2DStructure(m,template)
     m = Chem.MolFromSmiles("O1C=C[C@H]([C@H]1O2)c3c2cc(OC)c4c3OC(=O)C5=C4CCC(=O)5")
 
-
-def test_search():
-    m = Chem.MolFromSmiles("CCCCC(C)C(Br)CCCCCCBr")
-    score, m_out, path =Search.search(m)
-    print "Synthesis solved!"
-    print "Starting molecule:"
-    print Chem.MolToSmiles(m_out)
-    print "Sequence of reactions:"
-    print path
-    # show_mol(m_out)
-
-
 def test(rxn_string, reactant_string_list):
     reactants = [Chem.MolFromSmiles(s) for s in reactant_string_list]
     for r in reactants:
@@ -359,8 +346,17 @@ def readCL():
     parser.add_argument("-l","--log_level",default="INFO")
     args = parser.parse_args()
     return args.log_level
-    
-if __name__ == "__main__":
+
+def test_search():
+    m = Chem.MolFromSmiles("CCCCC(C)C(Br)CCCCCCBr")
+    score, m_out, path =Search.search(m)
+    print "Synthesis solved!"
+    print "Starting molecule:"
+    print Chem.MolToSmiles(m_out)
+    print "Sequence of reactions:"
+    print path
+    # show_mol(m_out)
+
     m = Chem.MolFromSmiles('CC[C@@H]([OH])[C@]([Br])(I)I')
     # m = Chem.MolFromSmiles("CCCCC(C)C(Br)C([OH])CCCCCBr")
     m = Chem.MolFromSmiles('[OH]CC(Br)(Br)')
@@ -387,6 +383,8 @@ if __name__ == "__main__":
     start = Chem.MolFromSmiles('C1C([CH3])([OH])CCCC1')
     end = Chem.MolFromSmiles('C1C([CH3])=CCCC1')
 
+    print Search.search(end, start)
+
     # start = Chem.MolFromSmiles('CC=CC(C)C')
     # end = 
 
@@ -406,4 +404,11 @@ if __name__ == "__main__":
     start = Chem.MolFromSmiles('CCCC#C')
     end = Chem.MolFromSmiles('CCCC=O')
     
-    print Search.search(end, start)
+
+    
+if __name__ == "__main__":
+    # rxn = Reaction('Acetylide_Ion_Alkylation',['[CH:1]#[C:2][C:3][C:4] >> [CH:1]#[CH:2].[C:4][CH2:3][Br]',   '[C:1][C:2]#[C:3][CH2:4][C:5] >> [C:1][C:2]#[CH:3].[C:5][CH2:4][Br]'])
+    # rxn = Reaction('bob',['[C:1][C:2][C:3] >> [C:1].[C:2].[C:3]'])
+    # print (rxn.reverse([Chem.MolFromSmiles("CCC")]))
+    # print Chem.MolToSmiles(rxn.reverse([Chem.MolFromSmiles("CCC")])[0])
+    test_search()
